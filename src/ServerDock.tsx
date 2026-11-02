@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
-import { ArrowRightLeft, Cpu, Database, HardDrive, LayoutDashboard, Plus, RefreshCw, Server as ServerIcon, Terminal, Settings2 } from 'lucide-react'
+import { ArrowRightLeft, Download, Cpu, Database, HardDrive, LayoutDashboard, Plus, RefreshCw, Server as ServerIcon, Terminal, Settings2 } from 'lucide-react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen } from '@tauri-apps/api/event'
 import { api } from './services/api'
 import { serverdock, type TransferMode } from './services/serverdock'
+import { SshImportSheet } from './components/SshImportSheet'
 import { ServerForm } from './components/ServerForm'
 import { SshTerminal } from './components/SshTerminal'
 import type { HostKeyInfo, Project, ProjectSyncProgress, Server, ServerDraft, Snapshot } from './types/models'
@@ -27,6 +28,9 @@ export default function ServerDock() {
   const [openedTerminals, setOpenedTerminals] = useState<string[]>([])
   const [form, setForm] = useState<Partial<ServerDraft> | null>(null)
   const [hostKey, setHostKey] = useState<HostKeyInfo | null>(null)
+  const [importDrafts, setImportDrafts] = useState<ServerDraft[] | null>(null)
+  const [importingConfig, setImportingConfig] = useState(false)
+  const importingRef = useRef(false)
   const [notice, setNotice] = useState('')
   const [search, setSearch] = useState('')
   const [busy, setBusy] = useState(false)
@@ -55,6 +59,27 @@ export default function ServerDock() {
     if (!alive.current) return
     setServers(next); setProjects(jobs)
   }, [])
+
+  const importConfig = useCallback(async () => {
+    if (importingRef.current) return
+    importingRef.current = true; setImportingConfig(true)
+    try {
+      const drafts = await api.importSshConfig()
+      if (!drafts.length) setNotice('已读取 SSH Config，但没有找到可导入的 Host；通配符 Host 会被忽略。')
+      else setImportDrafts(drafts)
+    } catch (error) { setNotice(`SSH Config 导入失败：${message(error)}`) }
+    finally { importingRef.current = false; setImportingConfig(false) }
+  }, [])
+
+  const importSelected = async (drafts: ServerDraft[]) => {
+    let imported = 0
+    try {
+      for (const draft of drafts) { await api.saveServer({ ...draft, remoteHistoryEnabled: false }); imported++ }
+      setImportDrafts(null); setNotice(`已导入 ${imported} 台服务器`)
+    } catch (error) {
+      throw new Error(`已导入 ${imported} 台；其余导入失败：${message(error)}。已导入的连接会自动跳过，可重试剩余项。`)
+    } finally { await refreshLists() }
+  }
 
   const collect = useCallback(async (server: Server, force = false) => {
     if (collecting.current.has(server.id)) return
@@ -91,11 +116,11 @@ export default function ServerDock() {
       if (payload === 'menu-refresh-all') for (const server of servers) void collect(server, true)
       if (payload === 'menu-about' || payload === 'menu-help-guide' || payload === 'menu-help-project') setNotice('ServerDock · Linux CPU、内存、存储和数据传输工作台 · 基于 RackTop，GPL-3.0。项目主页：https://github.com/JadeiteMind/ServerDock')
       if (payload === 'menu-settings') setNotice('连接配置可在服务器详情中编辑。')
-      if (payload === 'menu-import-config') setNotice('添加服务器时可选择 SSH Config 认证方式并填写本机已有的别名。')
+      if (payload === 'menu-import-config') void importConfig()
     })
     void listener.catch(error => setNotice(message(error)))
     return () => { void listener.then(unlisten => unlisten()).catch(() => {}) }
-  }, [servers, collect])
+  }, [servers, collect, importConfig])
   useEffect(() => {
     let stopped = false
     const tick = async () => {
@@ -148,7 +173,7 @@ export default function ServerDock() {
       <nav aria-label="主导航"><button className={page === 'overview' ? 'active' : ''} onClick={() => { setPage('overview'); setSelected(null) }}><LayoutDashboard size={18} />服务器总览</button><button className={page === 'transfer' ? 'active' : ''} onClick={() => { setPage('transfer'); setSelected(null) }}><ArrowRightLeft size={18} />数据传输</button></nav>
       <div className="sd-sidebar-label">服务器 <span>{servers.length}</span></div>
       <div className="sd-server-list">{servers.map(item => <button key={item.id} className={selected === item.id ? 'active' : ''} onClick={() => { setPage('overview'); setSelected(item.id); setTab('resources') }}><span className={`sd-dot ${errors[item.id] ? 'bad' : snapshots[item.id] ? 'good' : ''}`} />{item.name}</button>)}</div>
-      <button className="sd-add" onClick={() => setForm({})}><Plus size={17} />添加服务器</button><footer>CPU · 内存 · 存储<br />基于 RackTop · GPL-3.0</footer>
+      <button disabled={importingConfig} onClick={() => void importConfig()}><Download size={17} />{importingConfig ? '正在读取…' : '导入 SSH Config'}</button><button className="sd-add" onClick={() => setForm({})}><Plus size={17} />添加服务器</button><footer>CPU · 内存 · 存储<br />基于 RackTop · GPL-3.0</footer>
     </aside>
     <main className="sd-main"><header className="sd-topbar"><span data-tauri-drag-region>工作台 / {page === 'transfer' ? '数据传输' : server?.name ?? '服务器总览'}</span><div>{!api.isDesktop && <span className="sd-badge">演示数据</span>}{api.isDesktop && <><button aria-label="最小化" onClick={() => void getCurrentWindow().minimize()}>−</button><button aria-label="最大化或还原" onClick={() => void getCurrentWindow().toggleMaximize()}>□</button><button aria-label="关闭窗口" onClick={() => void getCurrentWindow().close()}>×</button></>}</div></header>
       <div className="sd-content">
@@ -168,6 +193,7 @@ export default function ServerDock() {
         {tab === 'processes' && <section className="sd-panel"><h2>CPU 与内存进程</h2><div className="sd-table-wrap"><table><thead><tr><th>PID</th><th>用户</th><th>CPU</th><th>内存</th><th>运行时间</th><th>命令</th></tr></thead><tbody>{snapshot?.cpuProcesses.map(process => <tr key={process.pid}><td>{process.pid}</td><td>{process.username}</td><td>{process.cpuPercent.toFixed(1)}%</td><td>{bytes(process.memoryUsedBytes)}</td><td>{process.elapsed}</td><td title={process.command}>{process.command}</td></tr>)}</tbody></table></div>{!snapshot?.cpuProcesses.length && <p>尚无进程采样。</p>}<small>CPU 百分比按单个逻辑核心计，可超过 100%。</small></section>}
       </> : <>
         <div className="sd-heading"><div><span className="sd-eyebrow">YOUR INFRASTRUCTURE, AT A GLANCE</span><h1>服务器总览</h1><p>集中掌握每一台服务器的 CPU、内存和存储。</p></div><button className="sd-primary" onClick={() => setForm({})}><Plus size={17} />添加服务器</button></div>
+        <section className="sd-panel sd-config-import"><div><strong>从 SSH Config 导入</strong><p>读取本机已有连接，保留 SSH 别名、密钥和跳板机配置。默认读取用户目录下的 .ssh/config。</p></div><div className="sd-actions"><button disabled={importingConfig} onClick={() => void importConfig()}><Download size={16} />{importingConfig ? '正在读取 SSH Config…' : '读取并导入'}</button></div></section>
         <div className="sd-stats"><div><ServerIcon /><small>在线服务器</small><strong>{online.length}<span> / {servers.length}</span></strong></div><div><Cpu /><small>平均 CPU 使用率</small><strong>{(currentSnapshots.reduce((sum, item) => sum + item.system.cpuUtilization, 0) / Math.max(1, online.length)).toFixed(1)}<span>%</span></strong></div><div><Database /><small>内存使用</small><strong>{bytes(usedMemory)}<span> / {bytes(totalMemory)}</span></strong></div><div><HardDrive /><small>已报告挂载点可用容量</small><strong>{bytes(disks.reduce((sum, item) => sum + item.availableBytes, 0))}</strong></div></div>
         <div className="sd-section-heading"><h2>全部服务器</h2><input aria-label="搜索服务器" placeholder="搜索名称、地址或标签…" value={search} onChange={event => setSearch(event.target.value)} /></div><div className="sd-cards">{servers.filter(item => `${item.name} ${item.host} ${item.tags.join(' ')}`.toLowerCase().includes(search.toLowerCase())).map(item => { const sample = snapshots[item.id]; return <article className="sd-panel sd-card" key={item.id}><button className="sd-card-title" onClick={() => { setSelected(item.id); setTab('resources') }}><ServerIcon size={22} /><strong>{item.name}</strong><span className={`sd-dot ${errors[item.id] ? 'bad' : sample ? 'good' : ''}`} /><small>{errors[item.id] ? '连接失败' : sample ? '在线' : '连接中'}</small></button><p>{item.username}@{item.host}</p>{sample ? <><Meter label="CPU" value={sample.system.cpuUtilization} detail={sample.system.cpuModel} /><Meter label="内存" value={percent(sample.system.memoryUsedBytes, sample.system.memoryTotalBytes)} detail={`${bytes(sample.system.memoryUsedBytes)} / ${bytes(sample.system.memoryTotalBytes)}`} /><Meter label="存储" value={percent((sample.disks ?? []).reduce((sum, disk) => sum + disk.usedBytes, 0), (sample.disks ?? []).reduce((sum, disk) => sum + disk.totalBytes, 0))} detail={`${sample.disks?.length ?? 0} 个已报告挂载点`} /></> : <p>{errors[item.id] ? '打开详情查看错误并核验 SSH 主机指纹。' : '正在读取资源…'}</p>}<div className="sd-card-footer"><span>{sample ? `采样于 ${new Date(sample.timestamp * 1000).toLocaleTimeString()}` : '等待首次采样'}</span><button onClick={() => { setSelected(item.id); setTab('terminal') }}><Terminal size={14} />终端</button></div></article> })}</div>{!servers.length && <div className="sd-panel">添加第一台 Linux 服务器，通过 SSH 开始监控。</div>}
       </>}
@@ -177,6 +203,7 @@ export default function ServerDock() {
       })}
       </div>
     </main>
+    {importDrafts && <SshImportSheet drafts={importDrafts} servers={servers} onClose={() => setImportDrafts(null)} onImport={importSelected} />}
     {form && <ServerForm cpuOnly initial={form} defaultRemoteHistoryEnabled={false} showGuide={false} onClose={() => setForm(null)} onSave={saveServer} />}
     {hostKey && <div className="sd-modal-backdrop"><section role="dialog" aria-modal="true" aria-labelledby="sd-host-title" className="sd-panel sd-modal"><h2 id="sd-host-title">核验 SSH 主机指纹</h2><p>{hostKey.host} · {hostKey.algorithm}</p><code>{hostKey.fingerprint}</code><p>{hostKey.changed ? '主机指纹已变化。请先向服务器管理员核实原因。' : '请通过服务器控制台或管理员独立确认指纹一致，再信任此主机。'}</p><div className="sd-actions"><button autoFocus onClick={() => setHostKey(null)}>取消</button><button disabled={hostKey.changed || busy} className="sd-primary" onClick={() => { setBusy(true); void api.trustHostKey(hostKey).then(() => { setHostKey(null); const item = servers.find(item => item.id === hostKey.serverId); if (item) void collect(item, true) }).catch(error => setNotice(message(error))).finally(() => setBusy(false)) }}>已核对，信任主机</button></div></section></div>}
   </div>

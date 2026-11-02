@@ -10,7 +10,7 @@ import type { Project, Server, Snapshot } from './types/models'
 
 vi.mock('./components/SshTerminal', () => ({ SshTerminal: () => <div>terminal</div> }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))
-vi.mock('./services/api', () => ({ api: { isDesktop: true, listProjectSyncProgress: vi.fn(async () => []), saveProject: vi.fn(), cancelProjectSync: vi.fn() } }))
+vi.mock('./services/api', () => ({ api: { isDesktop: true, listProjectSyncProgress: vi.fn(async () => []), saveProject: vi.fn(), cancelProjectSync: vi.fn(), importSshConfig: vi.fn(), saveServer: vi.fn() } }))
 vi.mock('./services/serverdock', () => ({ serverdock: { servers: vi.fn(), projects: vi.fn(), collect: vi.fn(), transfer: vi.fn() } }))
 ;(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 let container: HTMLDivElement
@@ -30,6 +30,45 @@ beforeEach(() => {
 afterEach(() => { act(() => root.unmount()); container.remove() })
 
 describe('ServerDock CPU workspace', () => {
+  it('imports config aliases in bulk and skips existing connection targets', async () => {
+    const fresh = { name: 'cpu-node', host: 'new.local', port: 2222, username: 'alice', authMethod: 'sshConfig', sshAlias: 'cpu-node', identityFile: '~/.ssh/lab_key', proxyJump: 'bastion', tags: [], samplingIntervalSeconds: 2, historyRetentionDays: 90, remoteHistoryEnabled: false } as const
+    const draft = { ...fresh, tags: [] }
+    vi.mocked(api.importSshConfig).mockResolvedValue([{ ...draft, name: servers[0].name, host: servers[0].host, port: servers[0].port, username: servers[0].username, sshAlias: 'existing' }, draft])
+    vi.mocked(api.saveServer).mockResolvedValue({ ...draft, id: 'new', status: 'unknown' })
+    await act(async () => root.render(<ServerDock />)); await flush()
+    await act(async () => button('导入 SSH Config').click()); await flush()
+    expect(api.importSshConfig).toHaveBeenCalledWith()
+    expect(container.textContent).toContain('跳过 1 台重复服务器')
+    const duplicate = container.querySelector<HTMLInputElement>('.import-row--duplicate input')!
+    expect(duplicate.disabled).toBe(true)
+    await act(async () => button('导入 1 台').click()); await flush()
+    expect(api.saveServer).toHaveBeenCalledTimes(1)
+    expect(api.saveServer).toHaveBeenCalledWith(expect.objectContaining({ sshAlias: 'cpu-node', identityFile: '~/.ssh/lab_key', proxyJump: 'bastion', port: 2222, authMethod: 'sshConfig', remoteHistoryEnabled: false }))
+    expect(container.textContent).toContain('已导入 1 台服务器')
+  })
+  it('keeps remaining imports retryable after a partial save failure', async () => {
+    const draft = { name: 'one', host: 'one.local', port: 22, username: 'user', authMethod: 'sshConfig', tags: [], samplingIntervalSeconds: 2, historyRetentionDays: 90, remoteHistoryEnabled: false } as import('./types/models').ServerDraft
+    const second = { ...draft, name: 'two', host: 'two.local' }
+    const saved = { ...draft, id: 'new', status: 'unknown' } as Server
+    vi.mocked(api.importSshConfig).mockResolvedValue([draft, second])
+    vi.mocked(api.saveServer).mockResolvedValueOnce(saved).mockRejectedValueOnce(new Error('写入失败')).mockResolvedValueOnce({ ...second, id: 'two', status: 'unknown' })
+    vi.mocked(serverdock.servers).mockResolvedValueOnce(servers).mockResolvedValue([...servers, saved])
+    await act(async () => root.render(<ServerDock />)); await flush()
+    await act(async () => button('导入 SSH Config').click()); await flush()
+    await act(async () => button('导入 2 台').click()); await flush()
+    expect(container.textContent).toContain('已导入 1 台；其余导入失败')
+    await act(async () => button('导入 1 台').click()); await flush()
+    expect(api.saveServer).toHaveBeenCalledTimes(3)
+    expect(api.saveServer).toHaveBeenLastCalledWith(expect.objectContaining({ host: 'two.local' }))
+  })
+  it('reports config read errors and empty config results', async () => {
+    vi.mocked(api.importSshConfig).mockRejectedValueOnce(new Error('文件不存在')).mockResolvedValueOnce([])
+    await act(async () => root.render(<ServerDock />)); await flush()
+    await act(async () => button('读取并导入').click()); await flush()
+    expect(container.textContent).toContain('文件不存在')
+    await act(async () => button('读取并导入').click()); await flush()
+    expect(container.textContent).toContain('没有找到可导入的 Host')
+  })
   it('keeps an opened terminal mounted while navigating away and back', async () => {
     await act(async () => root.render(<ServerDock />)); await flush()
     act(() => button('compute').click()); await flush()

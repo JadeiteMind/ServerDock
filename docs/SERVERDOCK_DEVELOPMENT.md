@@ -34,3 +34,11 @@ Application identifier, database and keyring namespace are isolated from RackTop
 - Direct mode requires a destination that does not yet exist. Relay has upstream synchronization semantics, including updates/deletions on subsequent syncs, and is best used with a dedicated destination directory.
 - CPU process rows are capped at 64; CPU process percentages may exceed 100%. Disk values describe reported mounts, which may refer to shared physical storage.
 - Existing upstream dead-code compiler warnings and frontend bundle-size warning remain. npm ci reported inherited dependency audit advisories; dependencies were not automatically upgraded as part of this feature.
+
+## 2026-11-03 — Restore upstream SSH Config import
+
+The first fork removed the SSH Config import entry while retaining its backend. This update restores the original read → select → deduplicate → save workflow. The upstream and ServerDock entries now share SshImportSheet, rather than maintaining independent copies. ServerDock refreshes saved entries after a partial failure so retry skips successful saves. Sidebar, overview and the native import menu use the same action. The default file is the user's .ssh/config; wildcard-only Host blocks are excluded by the existing upstream parser.
+
+Targeted validation: 11 tests passed for ServerDock/import identity, plus 15 upstream collection/terminal regression tests. Cases cover preserving SSH aliases/key/ProxyJump/port, skipping existing connections, retrying a partial import, missing or empty files, CPU views and terminal lifecycle. TypeScript/production build and local desktop deployment are checked as part of this update. No remote hosts are automatically trusted, no remote SSH configuration is modified, and real server details are not committed.
+
+Upstream capability audit: SSH terminals, host key verification, authentication methods, CPU metrics, disk capacity and transfer conflict/resume logic remain. Server ordering/deletion, historical views, general settings, and project/resource management still need separate parity work; this update does not claim those upstream surfaces are all restored. Further removal should be confined to accelerator-specific features.

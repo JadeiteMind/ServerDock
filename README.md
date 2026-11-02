@@ -6,6 +6,7 @@
 
 - 服务器总览：CPU 使用率、系统负载、内存、Swap 和磁盘容量。
 - 进程列表：CPU 占用、常驻内存、用户、运行时间和命令。
+- SSH Config 一键导入：读取本机 `~/.ssh/config`，批量选择 Host，自动跳过重复连接，保留 SSH 别名、密钥和 ProxyJump。
 - SSH 终端、SSH Agent / 密钥 / 密码 / SSH Config 连接和主机指纹核验。
 - 跨服务器文件、目录传输：直接传输优先；可显式选择本机中转。
 - 独立应用标识 `io.github.jadeitemind.serverdock` 和本地数据库，不读取 RackTop 的应用数据。
