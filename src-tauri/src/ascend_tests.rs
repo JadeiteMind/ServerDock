@@ -3,7 +3,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 fn run_helper(info: &str, function: &str) -> String {
-    let shell = if cfg!(windows) { "C:/Program Files/Git/bin/bash.exe" } else { "sh" };
+    let shell = "sh";
     let mut child = Command::new(shell).arg("-s").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().expect("shell for collector regression tests");
     let script = format!("{}\nracktop_npu_info=$(cat <<'RACKTOP_FIXTURE'\n{}\nRACKTOP_FIXTURE\n)\n{}\n", include_str!("../assets/ascend-collector.sh"), info, function);
     child.stdin.take().unwrap().write_all(script.replace("\r\n", "\n").as_bytes()).unwrap();

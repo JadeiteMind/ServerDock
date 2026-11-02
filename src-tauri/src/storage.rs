@@ -1922,7 +1922,7 @@ impl Database {
                     .map_err(|error| error.to_string())?
                     .remove(&id);
                 if draft.save_password {
-                    let entry = keyring::Entry::new("com.racktop.desktop", &id)
+                    let entry = keyring::Entry::new("io.github.jadeitemind.serverdock", &id)
                         .map_err(|error| error.to_string())?;
                     entry
                         .set_password(&password)
@@ -2013,7 +2013,7 @@ impl Database {
         transaction.commit().map_err(|error| error.to_string())?;
         drop(connection);
         if delete_credential && auth_method.as_deref() == Some("password") {
-            if let Ok(entry) = keyring::Entry::new("com.racktop.desktop", id) {
+            if let Ok(entry) = keyring::Entry::new("io.github.jadeitemind.serverdock", id) {
                 let _ = entry.delete_credential();
             }
         }
@@ -2095,7 +2095,7 @@ impl Database {
             .map_err(|error| error.to_string())?;
         drop(connection);
         if delete_credential {
-            if let Ok(entry) = keyring::Entry::new("com.racktop.desktop", server_id) {
+            if let Ok(entry) = keyring::Entry::new("io.github.jadeitemind.serverdock", server_id) {
                 let _ = entry.delete_credential();
             }
         }
@@ -2153,7 +2153,7 @@ impl Database {
             return Err(error);
         }
         let entry =
-            keyring::Entry::new("com.racktop.desktop", id).map_err(|error| error.to_string())?;
+            keyring::Entry::new("io.github.jadeitemind.serverdock", id).map_err(|error| error.to_string())?;
         match entry.get_password() {
             Ok(password) => {
                 self.session_passwords

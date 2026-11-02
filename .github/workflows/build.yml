@@ -1,324 +1,67 @@
-name: Build RackTop
+name: Build ServerDock
 
 on:
   workflow_dispatch:
     inputs:
-      build_macos:
-        description: Build macOS Apple Silicon packages
-        required: true
-        type: boolean
-        default: true
-      build_windows:
-        description: Build Windows x64 packages
-        required: true
-        type: boolean
-        default: true
-      build_linux:
-        description: Build Ubuntu x64 DEB and AppImage packages
-        required: true
-        type: boolean
-        default: true
-
-concurrency:
-  group: racktop-build-${{ github.run_id }}
-  cancel-in-progress: false
+      platform:
+        description: Desktop platform to build
+        type: choice
+        options: [windows, linux, macos, all]
+        default: windows
 
 permissions:
   contents: read
 
 jobs:
-  linux:
-    runs-on: ubuntu-22.04
-    if: inputs.build_linux
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            os: windows-latest
+            bundles: nsis,msi
+          - platform: linux
+            os: ubuntu-22.04
+            bundles: deb,appimage
+          - platform: macos
+            os: macos-latest
+            bundles: app,dmg
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        if: inputs.platform == matrix.platform || inputs.platform == 'all'
       - uses: actions/setup-node@v4
+        if: inputs.platform == matrix.platform || inputs.platform == 'all'
         with:
           node-version: 22
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
+        if: inputs.platform == matrix.platform || inputs.platform == 'all'
       - name: Install Linux dependencies
+        if: matrix.platform == 'linux' && (inputs.platform == 'linux' || inputs.platform == 'all')
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev libdbus-1-dev openssh-client xterm gnome-keyring xvfb
-      - run: npm ci
-      - run: npm run test
-      - name: Read package version
-        run: echo "RACKTOP_VERSION=$(node -p "require('./package.json').version")" >> "$GITHUB_ENV"
-      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
-      - name: Build signed Linux release packages
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run bundle:linux
-      - name: Sign DEB updater package
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev libdbus-1-dev openssh-client xterm
+      - name: Install and test
+        if: inputs.platform == matrix.platform || inputs.platform == 'all'
+        shell: bash
         run: |
-          for package in src-tauri/target/release/bundle/deb/*.deb; do
-            npm run tauri -- signer sign "$package"
-            test -s "$package.sig"
-          done
-      - name: Smoke-test packaged application
-        run: |
-          set -euo pipefail
-          DEB_PATH=$(find src-tauri/target/release/bundle/deb -name '*.deb' -print -quit)
-          test -n "$DEB_PATH"
-          dpkg-deb --info "$DEB_PATH"
-          dpkg-deb --extract "$DEB_PATH" "$RUNNER_TEMP/racktop-deb"
-          APP_PATH="$RUNNER_TEMP/racktop-deb/usr/bin/racktop"
-          test -x "$APP_PATH"
-          APPIMAGE_PATH=$(find src-tauri/target/release/bundle/appimage -name '*.AppImage' -type f -print -quit)
-          test -n "$APPIMAGE_PATH"
-          APPIMAGE_PATH=$(realpath "$APPIMAGE_PATH")
-          test -s "$APPIMAGE_PATH.sig"
-          xvfb-run -a dbus-run-session -- bash scripts/smoke-linux.sh "$APP_PATH"
-          mkdir -p "$RUNNER_TEMP/racktop-appimage"
-          (cd "$RUNNER_TEMP/racktop-appimage" && "$APPIMAGE_PATH" --appimage-extract)
-          xvfb-run -a dbus-run-session -- bash scripts/smoke-linux.sh "$RUNNER_TEMP/racktop-appimage/squashfs-root/AppRun"
-      - name: Record package checksums
-        run: sha256sum src-tauri/target/release/bundle/deb/*.deb src-tauri/target/release/bundle/appimage/*.AppImage > src-tauri/target/release/bundle/SHA256SUMS
+          npm ci
+          npm test
+          cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - name: Build desktop packages (no upstream updater signing)
+        if: inputs.platform == matrix.platform || inputs.platform == 'all'
+        shell: bash
+        run: npm run tauri -- build --bundles '${{ matrix.bundles }}'
       - uses: actions/upload-artifact@v4
+        if: inputs.platform == matrix.platform || inputs.platform == 'all'
         with:
-          name: RackTop_${{ env.RACKTOP_VERSION }}_linux-x64-deb
+          name: ServerDock-${{ matrix.platform }}-${{ github.sha }}
           if-no-files-found: error
           path: |
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/dmg/*.dmg
             src-tauri/target/release/bundle/deb/*.deb
-            src-tauri/target/release/bundle/deb/*.sig
-            src-tauri/target/release/bundle/SHA256SUMS
-      - uses: actions/upload-artifact@v4
-        with:
-          name: RackTop_${{ env.RACKTOP_VERSION }}_linux-x64-appimage
-          if-no-files-found: error
-          path: |
             src-tauri/target/release/bundle/appimage/*.AppImage
-            src-tauri/target/release/bundle/appimage/*.sig
-            src-tauri/target/release/bundle/SHA256SUMS
-
-  macos:
-    if: inputs.build_macos
-    runs-on: xcode-27
-    steps:
-      - uses: actions/checkout@v4
-      - name: Select Xcode 27 and record SDK
-        shell: bash
-        run: |
-          sudo xcode-select --switch /Applications/Xcode_27.app/Contents/Developer
-          xcodebuild -version
-          xcrun --sdk macosx --show-sdk-version
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin
-      - run: npm ci
-      - run: npm run test
-      - name: Read package version
-        shell: bash
-        run: |
-          RACKTOP_VERSION="$(node -p "require('./package.json').version")"
-          echo "RACKTOP_VERSION=$RACKTOP_VERSION" >> "$GITHUB_ENV"
-
-      - run: cargo test --manifest-path src-tauri/Cargo.toml
-      - name: Import Apple Developer ID certificate
-        shell: bash
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          CONFIGURED_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          NOTARY_APPLE_ID: ${{ secrets.APPLE_ID }}
-          NOTARY_APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          NOTARY_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          set -euo pipefail
-          if [ -z "$APPLE_CERTIFICATE" ]; then
-            if [ -n "$APPLE_CERTIFICATE_PASSWORD$NOTARY_APPLE_ID$NOTARY_APPLE_PASSWORD$NOTARY_APPLE_TEAM_ID" ]; then
-              echo "Apple signing and notarization secrets are only partially configured." >&2
-              exit 1
-            fi
-            echo "No Apple certificate configured; the artifact will be marked unsigned."
-            echo "RACKTOP_MARK_UNSIGNED=1" >> "$GITHUB_ENV"
-            exit 0
-          fi
-          if [ -z "$APPLE_CERTIFICATE_PASSWORD" ] || [ -z "$NOTARY_APPLE_ID" ] \
-            || [ -z "$NOTARY_APPLE_PASSWORD" ] || [ -z "$NOTARY_APPLE_TEAM_ID" ]; then
-            echo "A certificate and all Apple notarization secrets must be configured together." >&2
-            exit 1
-          fi
-
-          CERTIFICATE_PATH="$RUNNER_TEMP/racktop-developer-id.p12"
-          KEYCHAIN_PATH="$RUNNER_TEMP/racktop-signing.keychain-db"
-          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
-          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$CERTIFICATE_PATH"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security import "$CERTIFICATE_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" \
-            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          security set-key-partition-list -S apple-tool:,apple:,codesign: \
-            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security list-keychains -d user -s "$KEYCHAIN_PATH"
-
-          SIGNING_IDENTITY="$CONFIGURED_SIGNING_IDENTITY"
-          if [ -z "$SIGNING_IDENTITY" ]; then
-            SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
-              | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -1)"
-          fi
-          if [ -z "$SIGNING_IDENTITY" ]; then
-            echo "No Developer ID Application identity was found in APPLE_CERTIFICATE." >&2
-            exit 1
-          fi
-          echo "APPLE_SIGNING_IDENTITY=$SIGNING_IDENTITY" >> "$GITHUB_ENV"
-          echo "RACKTOP_MARK_UNSIGNED=0" >> "$GITHUB_ENV"
-
-      - name: Build, sign, notarize, and verify macOS DMG
-        shell: bash
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          RACKTOP_MACOS_TARGET: aarch64-apple-darwin
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run bundle:macos
-
-      - name: Upload macOS DMG
-        uses: actions/upload-artifact@v4
-        with:
-          name: RackTop_${{ env.RACKTOP_VERSION }}_macos-arm64-dmg
-          if-no-files-found: error
-          path: |
-            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
-            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.sha256
-            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.signing.txt
-
-      - name: Upload macOS updater package
-        uses: actions/upload-artifact@v4
-        with:
-          name: RackTop_${{ env.RACKTOP_VERSION }}_macos-arm64-updater
-          if-no-files-found: error
-          path: |
-            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz
-            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
-
-  windows:
-    if: inputs.build_windows
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-      - run: npm ci
-      - run: npm run test
-      - name: Read package version
-        shell: pwsh
-        run: |
-          $version = node -p "require('./package.json').version"
-          "RACKTOP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - run: cargo test --manifest-path src-tauri/Cargo.toml
-      - uses: tauri-apps/tauri-action@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          args: --target x86_64-pc-windows-msvc --bundles msi,nsis
-          uploadWorkflowArtifacts: false
-      - name: Smoke-test Windows installers
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $msi = Get-ChildItem 'src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi' -Filter '*.msi' | Select-Object -First 1
-          $nsis = Get-ChildItem 'src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis' -Filter '*-setup.exe' | Select-Object -First 1
-          if (-not $msi) { throw 'Windows build did not produce an MSI installer.' }
-          if (-not $nsis) { throw 'Windows build did not produce an NSIS setup executable.' }
-
-          $msiExtract = Join-Path $env:RUNNER_TEMP 'racktop-msi-extract'
-          $msiArgs = "/a `"$($msi.FullName)`" /qn /norestart TARGETDIR=`"$msiExtract`""
-          $msiProcess = Start-Process msiexec.exe -ArgumentList $msiArgs -Wait -PassThru
-          if ($msiProcess.ExitCode -ne 0) { throw "MSI administrative install failed with exit code $($msiProcess.ExitCode)." }
-          if (-not (Get-ChildItem $msiExtract -Recurse -Filter 'RackTop.exe' -ErrorAction SilentlyContinue)) {
-            throw 'MSI did not contain RackTop.exe.'
-          }
-
-          $nsisInstall = Join-Path $env:RUNNER_TEMP 'racktop-nsis-install'
-          $nsisProcess = Start-Process $nsis.FullName -ArgumentList "/S /D=$nsisInstall" -Wait -PassThru
-          if ($nsisProcess.ExitCode -ne 0) { throw "NSIS installation failed with exit code $($nsisProcess.ExitCode)." }
-          $app = Get-ChildItem $nsisInstall -Recurse -Filter 'RackTop.exe' | Select-Object -First 1
-          if (-not $app) { throw 'NSIS installation did not create RackTop.exe.' }
-
-          $appProcess = Start-Process $app.FullName -PassThru
-          Start-Sleep -Seconds 5
-          if ($appProcess.HasExited) { throw "Installed RackTop exited early with code $($appProcess.ExitCode)." }
-          for ($attempt = 0; $attempt -lt 2; $attempt++) {
-            $duplicate = Start-Process $app.FullName -PassThru
-            if (-not $duplicate.WaitForExit(10000)) {
-              Stop-Process -Id $duplicate.Id -Force
-              throw 'Duplicate RackTop launch did not exit within 10 seconds.'
-            }
-            if ($duplicate.ExitCode -ne 0) { throw "Duplicate launch failed with exit code $($duplicate.ExitCode)." }
-            $appProcess.Refresh()
-            if ($appProcess.HasExited) { throw 'Original RackTop exited during duplicate launch.' }
-            $instances = @(Get-Process | Where-Object { $_.Path -eq $app.FullName })
-            if ($instances.Count -ne 1 -or $instances[0].Id -ne $appProcess.Id) {
-              throw 'Repeated launch did not preserve exactly one original RackTop process.'
-            }
-          }
-          Stop-Process -Id $appProcess.Id -Force
-
-          $uninstaller = Get-ChildItem $nsisInstall -Recurse -Filter 'uninstall.exe' | Select-Object -First 1
-          if (-not $uninstaller) { throw 'NSIS installation did not create an uninstaller.' }
-          $uninstallProcess = Start-Process $uninstaller.FullName -ArgumentList '/S' -Wait -PassThru
-          if ($uninstallProcess.ExitCode -ne 0) { throw "NSIS uninstall failed with exit code $($uninstallProcess.ExitCode)." }
-
-      - name: Upload Windows setup package
-        uses: actions/upload-artifact@v4
-        with:
-          name: RackTop_${{ env.RACKTOP_VERSION }}_x64-setup
-          if-no-files-found: error
-          path: |
-            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
-            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe.sig
-
-      - name: Upload Windows MSI package
-        uses: actions/upload-artifact@v4
-        with:
-          name: RackTop_${{ env.RACKTOP_VERSION }}_x64_zh-CN-msi
-          if-no-files-found: error
-          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
-
-  build-source:
-    needs: [linux, macos, windows]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Record build source
-        env:
-          SOURCE_REPOSITORY: ${{ github.repository }}
-        run: |
-          python3 - <<'PYCODE'
-          import json, os, subprocess
-          from pathlib import Path
-          git = lambda ref: subprocess.check_output(['git', 'rev-parse', ref], text=True).strip()
-          Path('build-source.json').write_text(json.dumps({
-              'commit': git('HEAD'), 'tree': git('HEAD^{tree}'),
-              'version': json.loads(Path('package.json').read_text())['version'],
-              'repository': os.environ['GITHUB_REPOSITORY'],
-              'source_repository': os.environ['SOURCE_REPOSITORY'],
-              'complete': True,
-              'run_id': os.environ['GITHUB_RUN_ID'],
-          }, indent=2))
-          PYCODE
-      - uses: actions/upload-artifact@v4
-        with:
-          name: RackTop_build-source
-          path: build-source.json
-          if-no-files-found: error

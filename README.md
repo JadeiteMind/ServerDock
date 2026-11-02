@@ -1,162 +1,55 @@
-<div align="right">
-  🌐 Language:
-  <kbd><strong>✔简体中文</strong></kbd>
-  <a href="./README_EN.md"><kbd>English</kbd></a>
-</div>
+# ServerDock
 
-<p align="center">
-  <img src="docs/assets/readme/racktop-icon.png" alt="RackTop macOS Logo" width="300" />
-</p>
+面向 CPU 服务器的 Linux 桌面工作台，基于 [RackTop](https://github.com/Tongzh-SEU/RackTop) 开发。
 
-<h2 align="center">多台服务器，一个训练工作台</h2>
+## 功能
 
-<p align="center">
-  📊 查看算力、🔄 同步项目、🚀 启动任务，📈 并持续掌握运行状态。
-</p>
+- 服务器总览：CPU 使用率、系统负载、内存、Swap 和磁盘容量。
+- 进程列表：CPU 占用、常驻内存、用户、运行时间和命令。
+- SSH 终端、SSH Agent / 密钥 / 密码 / SSH Config 连接和主机指纹核验。
+- 跨服务器文件、目录传输：直接传输优先；可显式选择本机中转。
+- 独立应用标识 `io.github.jadeitemind.serverdock` 和本地数据库，不读取 RackTop 的应用数据。
 
-<p align="center">
-RackTop 是面向个人研究者和小型团队的 GPU 服务器桌面工作台，将分散在多台 Linux 服务器的算力状态、远程终端、项目资料和训练任务集中管理。
-启动前快速找到合适的 GPU，运行中持续掌握资源与进程状态，切换服务器时让项目、数据集和模型保持就绪。
-</p>
+ServerDock 不展示 GPU/NPU/PPU、显存、驱动安装和训练配置。当前代码中保留部分上游模型、解析器、组件和测试以便渐进迁移；桌面入口使用 `src/ServerDock.tsx`，远端资源采集使用 `src-tauri/assets/serverdock-collector.sh`。
 
-<p align="center">
-  <a href="https://github.com/Tongzh-SEU/RackTop/releases/latest"><img src="https://img.shields.io/github/v/release/Tongzh-SEU/RackTop?style=flat-square&logo=github&label=release" alt="Release"></a>
-  <a href="https://github.com/Tongzh-SEU/RackTop/stargazers"><img src="https://img.shields.io/github/stars/Tongzh-SEU/RackTop?style=flat-square&logo=github&label=stars" alt="GitHub Stars"></a>
-  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-1687b8?style=flat-square" alt="Platform">
-  <a href="https://github.com/Tongzh-SEU/RackTop/releases"><img src="https://img.shields.io/github/downloads/Tongzh-SEU/RackTop/total?style=flat-square&logo=github&label=downloads" alt="Downloads"></a>
-  <a href="https://github.com/Tongzh-SEU/RackTop/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-green?style=flat-square" alt="GPL-3.0 License"></a>
-</p>
+## 数据传输
 
+### 服务器直接传输（默认）
 
+数据由源服务器通过 rsync/SSH 发送到目标服务器，不经过桌面客户端。控制连接仍由桌面客户端维护。
 
-<p align="center">
-  <img src="docs/assets/readme/fleet-overview.png" alt="全局算力总览" width="33%">
-  <img src="docs/assets/readme/history-heatmap.png" alt="资源历史热力图" width="33%">
-  <img src="docs/assets/readme/idle-compute.png" alt="空闲算力筛选" width="33%">
-</p>
+前提：两端有 `rsync`，源端有 `flock`，源服务器能直接访问目标的主机地址和端口，源用户自己的密钥已获得目标权限，且源服务器的 `known_hosts` 中已独立核验目标指纹。不会复制本机私钥、转发本机 SSH Agent 或自动接受未知指纹。首版不复用本机 SSH 别名和 ProxyJump 到远端传输链路。
 
+填写源完整路径和目标完整路径（绝对路径或 `~/...`）。目标路径必须不存在；传输先写入同级 `.serverdock-*.part` 暂存路径，成功后再发布。暂停后保留暂存文件，再次使用同一任务和方式可利用 rsync 恢复。传输时不要同时修改源数据。不会自动删除源文件或覆盖现有目标。
 
-## 下载
+### 本机中转
 
-当前稳定版：**v1.26.2**
+两端只需分别能从本机通过 SSH 访问，文件数据流经过本机网络。复用上游项目同步的进度、冲突检查、暂存发布与续传机制。本机中转是同步语义：后续重试可能更新目标文件或移除源端已删除的文件，首版没有强制覆盖冲突入口。建议使用专用目标目录。
 
-| 平台 | 安装包 | 下载 |
-| --- | --- | --- |
-| macOS Apple Silicon | `RackTop_1.26.2_macos-arm64-unsigned.dmg` | [下载 macOS 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.2/RackTop_1.26.2_macos-arm64-unsigned.dmg) |
-| Windows x64 | `RackTop_1.26.2_x64-setup.exe` | [下载 Windows 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.2/RackTop_1.26.2_x64-setup.exe) |
-| Linux Ubuntu/Debian x64 | `RackTop_1.26.2_amd64.deb` | [下载 Linux 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.2/RackTop_1.26.2_amd64.deb) |
+直接传输失败后不会自动改走本机。用户可以在传输记录中选择“本机中转”后重试；两种方式使用不同的暂存文件，不共享续传偏移。
 
-更多版本见 [GitHub Releases](https://github.com/Tongzh-SEU/RackTop/releases)。
+## 本地开发
 
-Linux 提供 DEB 安装包；需要便携版本时，可在上方 Releases 页面下载 AppImage。
+Windows 桌面开发需要 Node.js 22+、Rust stable、Visual Studio C++ Build Tools、WebView2 和系统 OpenSSH。运行 Rust 中的 shell 集成测试时，需将 Git for Windows 的 `bin` 目录加入当前终端 PATH，提供 `sh.exe`。
 
-macOS版本若首次打开时提示应用来源受限，请前往“系统设置 → 隐私与安全性”，确认允许打开该应用。
-Windows版本若提示“智能应用控制已阻止可能不安全的应用”，请在“设置”中搜索“智能应用控制”，并将其关闭。
-
-## 作者的话
-
-<p align="center">
-<a href="https://www.star-history.com/?repos=tongzh-seu%2Fracktop&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=tongzh-seu/racktop&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=tongzh-seu/racktop&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=tongzh-seu/racktop&type=date&legend=top-left" width="50%"/>
- </picture>
-</a>
-</p>
-
-
-实验室服务器越来越多以后，项目之间的同步、任务运行和服务器状态查看会变得越来越麻烦。把这些事情交给 Agent 做，往往又会浪费不少 token 和时间，所以我决定开发 RackTop，把这些重复的操作收进一个真正可操作的工具里。
-
-当然，开发这个 App 的过程本身也花了很多 token，笑死。至少现在，下一次启动任务时不用再从头解释一遍服务器、项目和命令了。
-
-## 主要功能
-
-- **多服务器算力总览**：集中查看 GPU、CPU、系统内存、温度、利用率和进程状态，并按服务器与 GPU 快速定位资源。
-- **空闲算力发现**：按显存、利用率、占用状态和持续空闲时间筛选可用 GPU，直接打开远程终端或进入启动任务流程。
-- **远程终端**：通过 SSH 打开服务器终端，适合临时检查环境、查看文件和处理启动前问题。
-- **项目资料管理**：按项目管理工作目录，并关联数据集和模型；支持跨服务器检查状态、同步副本和补齐缺失资料。
-- **启动配置与任务管理**：保存项目级启动配置，在不同服务器和 GPU 上切换工作目录、GPU 卡号、Shell 命令、超参数和日志路径，再统一启动和监测任务。
-- **运行状态与历史**：查看 RackTop 任务和外部进程、日志、资源监测、历史热力图，以及离线、高温、空闲和进程退出通知。
-- **安全连接**：支持 SSH Agent、密钥、密码、`~/.ssh/config`、ProxyJump 和 Host Key 指纹核验，不自动接受未知主机。
-
-
-## 安全与数据
-
-- Host Key 未确认时不会自动接受；指纹变化会阻止连接。
-- 密码不会写入命令行、日志或 SQLite，只保存在会话内存或系统钥匙串。
-- RackTop 不会自动执行 `sudo` 或未经确认修改远程服务器。
-- 服务器、项目、数据集、模型、启动配置和历史数据保存在本机应用数据目录；卸载应用通常不会自动删除这些数据，如需彻底清理请先在应用设置中导出或删除，再按操作系统清理应用数据目录。
-
-## 开发者说明
-
-RackTop 使用 Tauri 2、React、TypeScript、Rust 和 SQLite 构建。开发环境需要 Node.js 20+、Rust stable 和系统 OpenSSH。
-
-```bash
-npm install
+```sh
+npm ci
 npm run dev
 npm run tauri dev
 ```
 
-运行前端构建和 Rust 测试：
+网页预览为演示数据，不能执行真实 SSH 和文件传输。服务器须为 Linux，采集依赖 `/proc`、procps、GNU coreutils；首版未提供非 Linux 采集。
 
-```bash
+```sh
+npm test
 npm run build
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --locked --manifest-path src-tauri/Cargo.toml
 ```
 
-本地打包：
+GitHub Actions 的 Build ServerDock 工作流仅手动运行，生成桌面安装包，不自动发布 Release。上游自动更新已停用，避免将 ServerDock 更新为 RackTop；当前版本号暂沿用上游 1.26.2，不代表 ServerDock 已发布。
 
-```bash
-npm run tauri build
-```
+磁盘统计按 df 报告的挂载点显示；bind mount 或共享后端可能重复计量，不代表物理磁盘总容量。CPU 进程百分比按单逻辑核心计，可超过 100%。进程列表保留最多 64 条，容量采样每 60 秒，手动刷新可立即更新。
 
-macOS 的应用和 DMG 会输出到 `src-tauri/target/release/bundle/`。GitHub Actions 会分别构建 macOS 和 Windows 安装包。
+## 许可证与来源
 
-## 产品说明书
-
-### 1. 添加服务器
-
-第一次使用时，从“添加服务器”开始。填写 SSH 地址、端口和登录用户，按需要选择 SSH Agent、密钥或密码，并完成 Host Key 核验。RackTop 会通过 SSH 读取服务器资源，不需要在服务器安装额外服务。
-
-![添加 SSH 服务器](docs/assets/readme/add-server.png)
-
-### 2. 查看服务器与 GPU 状态
-
-总览页按服务器展示 GPU 数量、GPU 显存、系统内存和在线状态。进入服务器后，可以查看每张 GPU 的利用率、显存、温度、当前进程和 CPU 状态；点击卡片可以继续查看细节。
-
-![服务器概览](docs/assets/readme/overview.png)
-
-![全局算力总览](docs/assets/readme/fleet-overview.png)
-
-### 3. 使用远程终端
-
-需要临时检查环境时，打开对应服务器的远程终端。终端复用已配置的 SSH 连接，适合执行检查命令、确认目录、验证 Python 环境或排查任务启动问题。
-
-![远程终端](docs/assets/readme/terminal.png)
-
-### 4. 发现空闲算力
-
-在“空闲算力”中按 GPU 使用情况、可用显存和是否有进程占用筛选资源。点击启动按钮会进入启动任务，点击终端按钮只打开远程终端，不会改变任务配置。
-
-![空闲算力筛选](docs/assets/readme/idle-compute.png)
-
-### 5. 查看资源历史
-
-资源历史以热力图展示近期 GPU 使用情况，时间坐标固定在左侧并随窗口自适应。它适合快速判断一台服务器什么时候繁忙、哪些 GPU 长时间空闲，以及任务运行是否出现异常波动。
-
-![资源历史热力图](docs/assets/readme/history-heatmap.png)
-
-### 6. 管理项目、数据集和模型
-
-项目是长期管理的核心。为项目关联数据集和模型后，RackTop 会检查它们在目标服务器上的路径和副本状态；需要在另一台服务器运行时，可以从同步弹窗查看缺失项并执行同步或补齐。一个数据集或模型可以被多个项目关联。
-
-![项目、数据集和模型同步](docs/assets/readme/sync-dialog.png)
-
-### 7. 创建启动任务
-
-启动配置按项目保存。同一套超参数可以针对不同服务器切换工作目录、GPU 卡号和运行命令；粘贴已有命令时，RackTop 会识别其中的 `cd`、`CUDA_VISIBLE_DEVICES` 和项目日志路径，并在启动前生成预览。未提供项目日志路径时，RackTop 使用自己的受管日志路径，便于在任务页统一查看日志。
-
-![启动任务](docs/assets/readme/launch-task.png)
-
-启动后可以在“我的进程”中查看任务状态、日志和资源占用，并安全结束任务或外部进程。
+保留 [GPL-3.0](LICENSE) 许可证和 RackTop 上游贡献历史。原项目由 [Tongzh-SEU](https://github.com/Tongzh-SEU/RackTop) 开发；ServerDock 的 CPU 工作台与传输改造在本 fork 维护。

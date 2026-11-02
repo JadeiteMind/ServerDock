@@ -646,6 +646,157 @@ pub async fn sync(database: &Database, project: &Project, target_server_id: &str
     }
 }
 
+fn direct_destination(server: &crate::models::Server, path: &str) -> Result<String, String> {
+    if server.host.is_empty() || server.host.starts_with('-') || !server.host.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '_'))
+        || server.username.is_empty() || server.username.starts_with('-') || !server.username.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')) {
+        return Err("直接传输需要明确的 SSH 主机地址和用户名；请编辑连接信息或选择本机中转".into());
+    }
+    if server.proxy_jump.as_deref().is_some_and(|value| !value.is_empty()) || server.ssh_alias.as_deref().is_some_and(|value| !value.is_empty()) {
+        return Err("直接传输暂不复用本机 SSH 别名或跳板配置，请选择本机中转".into());
+    }
+    let host = if server.host.contains(':') { format!("[{}]", server.host) } else { server.host.clone() };
+    Ok(format!("{}@{}:{}", server.username, host, path))
+}
+
+fn direct_progress_bytes(line: &str) -> Option<u64> {
+    let mut fields = line.split_whitespace();
+    let amount = fields.next()?;
+    if !fields.next()?.ends_with('%') { return None; }
+    amount.replace(',', "").parse().ok()
+}
+
+fn direct_publish_script(target_path: &str, stage_path: &str) -> String {
+    format!(r#"set -eu; target={}; stage={}; [ ! -e "$target" ] && [ ! -L "$target" ] || {{ echo '目标在传输期间已创建，未覆盖' >&2; exit 73; }}; [ -e "$stage" ] || [ -L "$stage" ]; mv -T -n -- "$stage" "$target"; [ ! -e "$stage" ] && [ ! -L "$stage" ] || {{ echo '目标冲突，暂存文件保留' >&2; exit 73; }}"#, shell_quote(target_path), shell_quote(stage_path))
+}
+
+/// Direct data plane: rsync runs on the source using that server's own keys.
+/// The desktop retains the control plane, including staging and publication.
+pub async fn sync_direct(database: &Database, project: &Project, target_server_id: &str) -> Result<ProjectSyncResult, String> {
+    let target = project.targets.iter().find(|target| target.server_id == target_server_id).ok_or("目标服务器不属于此任务")?;
+    let source = database.get_server(&project.source_server_id)?;
+    let destination = database.get_server(target_server_id)?;
+    direct_destination(&destination, "/")?;
+    if source.id == destination.id || (source.host.eq_ignore_ascii_case(&destination.host) && source.port == destination.port) {
+        return Err("请选择两台不同的服务器".into());
+    }
+    for path in [&project.source_path, &target.path] {
+        if path.trim().is_empty() || path.chars().any(char::is_control) {
+            return Err("路径不能为空或包含控制字符".into());
+        }
+    }
+    let key = format!("{}:{}:{}:{}", destination.host.to_lowercase(), destination.port, destination.username, normalized_sync_path(&target.path));
+    let (_active, cancel) = acquire_sync_target(key.clone(), &project.id, target_server_id, project.source_size_bytes)?;
+    database.mark_project_syncing(&project.id, target_server_id)?;
+    let operation = async {
+        let source_password = if source.auth_method == "password" { database.get_password(&source.id, true)? } else { None };
+        let destination_password = if destination.auth_method == "password" { database.get_password(&destination.id, true)? } else { None };
+        let source_check = check_path(&source, source_password.as_deref(), &project.source_path, &project.name).await;
+        if let Some(error) = source_check.error.clone() { return Err(error); }
+        if !source_check.exists { return Err("源文件或目录不存在".into()); }
+        let before = check_path(&destination, destination_password.as_deref(), &target.path, &project.name).await;
+        if let Some(error) = before.error { return Err(error); }
+        if before.exists { return Err("直接传输要求目标路径不存在，不会覆盖已有数据；请选择新路径或显式选择本机中转".into()); }
+        let artifact = sync_artifact_id(project, &destination, &target.path);
+        let stage_suffix = format!(".serverdock-{artifact}.part");
+        // Resolve home and relative paths on the destination, never on the source.
+        let prepare = format!(r#"set -eu; command -v rsync >/dev/null || {{ echo '目标未安装 rsync' >&2; exit 69; }}; target={}; {}; case "$target" in /*) ;; *) echo '目标路径必须为绝对路径或 ~/' >&2; exit 64 ;; esac; target=$(realpath -m -- "$target"); [ "$target" != / ] && [ "$target" != "$HOME" ] || exit 64; [ ! -e "$target" ] && [ ! -L "$target" ] || exit 73; parent="${{target%/*}}"; mkdir -p -- "$parent"; stage="$target{}"; [ ! -L "$stage" ] || exit 73; printf '%s\n' "$target""#, shell_quote(&target.path), remote_home_expansion("target"), stage_suffix);
+        let resolved = remote_output(&destination, destination_password.as_deref(), prepare, 30).await?;
+        let target_path = resolved.trim();
+        if !target_path.starts_with('/') || target_path.chars().any(char::is_control) { return Err("无法解析目标路径".into()); }
+        let stage_path = format!("{target_path}{stage_suffix}");
+        let remote_path = direct_destination(&destination, &stage_path)?;
+        let source_path = if source_check.is_directory { format!("{}/", source_check.suggested_path.trim_end_matches('/')) } else { source_check.suggested_path.clone() };
+        update_sync_total(&key, source_check.size_bytes.max(1));
+        let transport = format!("ssh -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=yes -o ForwardAgent=no -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -p {}", destination.port);
+        // Discard inherited options so RSYNC_RSH/RSYNC_PROTECT_ARGS cannot alter routing.
+        let script = format!("set -eu; command -v rsync >/dev/null || {{ echo '源服务器未安装 rsync' >&2; exit 69; }}; command -v flock >/dev/null || {{ echo '源服务器未安装 flock' >&2; exit 69; }}; mkdir -p \"$HOME/.cache/serverdock\"; unset RSYNC_RSH RSYNC_PROTECT_ARGS RSYNC_OLD_ARGS; export LC_ALL=C; exec flock -n \"$HOME/.cache/serverdock/transfer-{artifact}.lock\" rsync --recursive --links --times --partial --protect-args --info=progress2 --no-inc-recursive --timeout=60 -e {} -- {} {}", shell_quote(&transport), shell_quote(&source_path), shell_quote(&remote_path));
+        let (mut command, host) = collector::configured_ssh_command(&source, source_password.as_deref())?;
+        // Explicitly override any source Host config requesting agent forwarding.
+        command.arg("-o").arg("ForwardAgent=no").arg(host).arg(script).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+        let mut child = command.spawn().map_err(|error| error.to_string())?;
+        let mut stdout = child.stdout.take().ok_or("无法读取传输进度")?;
+        let mut stderr = child.stderr.take().ok_or("无法读取传输错误")?;
+        let errors = tokio::spawn(async move {
+            let mut text = Vec::new();
+            let _ = (&mut stderr).take(64 * 1024).read_to_end(&mut text).await;
+            // Drain remaining stderr so a verbose remote cannot deadlock the transfer.
+            let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
+            String::from_utf8_lossy(&text).into_owned()
+        });
+        let result: Result<u64, String> = timeout(Duration::from_secs(6 * 60 * 60), async {
+            let mut buffer = [0_u8; 4096];
+            let mut line = String::new();
+            let mut transferred = 0;
+            update_sync_progress(&key, 0, "transferring");
+            loop {
+                if cancel.load(Ordering::Acquire) { return Err("__RACKTOP_PAUSED__".into()); }
+                let count = match timeout(Duration::from_millis(200), stdout.read(&mut buffer)).await {
+                    Ok(result) => result.map_err(|error| error.to_string())?,
+                    Err(_) => continue,
+                };
+                if count == 0 { break; }
+                for byte in &buffer[..count] {
+                    if *byte == b'\r' || *byte == b'\n' {
+                        if let Some(amount) = direct_progress_bytes(&line) { transferred = amount; update_sync_progress(&key, amount, "transferring"); }
+                        line.clear();
+                    } else if line.len() < 8192 { line.push(*byte as char); }
+                }
+            }
+            let status = wait_child_with_cancel(&mut child, &cancel).await?;
+            if !status.success() { return Err("服务器直接传输失败".into()); }
+            Ok(transferred)
+        }).await.unwrap_or_else(|_| Err("直接传输超过 6 小时，已停止等待".into()));
+        if result.is_err() { stop_child(&mut child).await; }
+        let error_text = errors.await.map_err(|error| error.to_string())?;
+        let transferred = result.map_err(|error| if error == "__RACKTOP_PAUSED__" || error_text.trim().is_empty() { error } else { format!("{error}：{}", error_text.trim()) })?;
+        if cancel.load(Ordering::Acquire) { return Err("__RACKTOP_PAUSED__".into()); }
+        update_sync_progress(&key, transferred, "publishing");
+        // Publish only to an absent destination. mv -n prevents replacing a path
+        // created during transfer; checking the stage detects its no-op exit 0.
+        let publish = direct_publish_script(target_path, &stage_path);
+        remote_output(&destination, destination_password.as_deref(), publish, 30).await?;
+        let verified = check_path(&destination, destination_password.as_deref(), target_path, &project.name).await;
+        if !verified.exists || verified.error.is_some() { return Err("传输结束但目标验证失败".into()); }
+        database.mark_project_synced(&project.id, target_server_id, source_check.size_bytes, source_check.file_count, source_check.modified_at, verified.size_bytes, verified.file_count, verified.modified_at, verified.is_directory)?;
+        Ok(ProjectSyncResult { project_id: project.id.clone(), target_server_id: target_server_id.into(), transferred_bytes: transferred, message: "服务器直接传输完成".into() })
+    }.await;
+    if let Err(error) = &operation {
+        if error == "__RACKTOP_PAUSED__" { let _ = database.mark_project_sync_paused(&project.id, target_server_id); }
+        else { let _ = database.mark_project_sync_failed(&project.id, target_server_id, error); }
+    }
+    operation.map_err(|error| if error == "__RACKTOP_PAUSED__" { "传输已暂停，暂存数据保留，可使用相同方式重试".into() } else { error })
+}
+
+#[cfg(test)]
+mod direct_tests {
+    use super::direct_progress_bytes;
+    #[test]
+    fn publication_preserves_conflicts_and_publishes_to_absent_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("destination with ' quote");
+        let stage = directory.path().join("stage with ' quote");
+        std::fs::write(&target, b"original").unwrap();
+        std::fs::write(&stage, b"new").unwrap();
+        let script = super::direct_publish_script(&target.to_string_lossy().replace('\\', "/"), &stage.to_string_lossy().replace('\\', "/"));
+        let shell = "sh";
+        let conflict = std::process::Command::new(shell).args(["-c", &script]).output().unwrap();
+        assert!(!conflict.status.success());
+        assert_eq!(std::fs::read(&target).unwrap(), b"original");
+        assert_eq!(std::fs::read(&stage).unwrap(), b"new");
+        std::fs::remove_file(&target).unwrap();
+        let published = std::process::Command::new(shell).args(["-c", &script]).output().unwrap();
+        assert!(published.status.success(), "{}", String::from_utf8_lossy(&published.stderr));
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert!(!stage.exists());
+    }
+    #[test]
+    fn parses_rsync_progress_and_rejects_noise() {
+        assert_eq!(direct_progress_bytes(" 1,234,567  42% 1.2MB/s"), Some(1_234_567));
+        assert_eq!(direct_progress_bytes("sending incremental file list"), None);
+        assert_eq!(direct_progress_bytes("123 transferred"), None);
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::{acquire_sync_target, delta_can_sync_without_confirmation, directory_delta, parse_directory_manifest, path_check_signature, remote_home_expansion, resume_checkpoint_offset, shell_quote, suggestion_script, sync_checkpoint_signature, target_changed_since_sync, target_publish_script, targets_after_source_check};
