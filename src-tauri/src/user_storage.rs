@@ -16,7 +16,7 @@ pub struct StorageUser { pub uid: u32, pub username: String }
 pub struct StorageEntry {
     pub uid: u32, pub username: String, pub path: String,
     pub canonical_path: Option<String>, pub status: String,
-    pub bytes: Option<u64>, pub checked_at: Option<i64>, pub error: Option<String>,
+    pub bytes: Option<u64>, pub previous_bytes: Option<u64>, pub checked_at: Option<i64>, pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -96,7 +96,7 @@ impl UserStorageManager {
         let old = jobs.get(&server.id).map(|job| job.scan.entries.clone()).unwrap_or_default();
         let entries = targets.iter().map(|target| {
             let cached = old.iter().find(|entry| entry.uid == target.uid && entry.path == target.path);
-            StorageEntry { uid: target.uid, username: target.username.clone(), path: target.path.clone(), canonical_path: cached.and_then(|entry| entry.canonical_path.clone()), status: "pending".into(), bytes: cached.and_then(|entry| entry.bytes), checked_at: cached.and_then(|entry| entry.checked_at), error: None }
+            StorageEntry { uid: target.uid, username: target.username.clone(), path: target.path.clone(), canonical_path: cached.and_then(|entry| entry.canonical_path.clone()), status: "pending".into(), bytes: cached.and_then(|entry| entry.bytes), previous_bytes: cached.and_then(|entry| entry.previous_bytes), checked_at: cached.and_then(|entry| entry.checked_at), error: None }
         }).collect();
         let scan = StorageScan { running: true, queued: true, started_at: now(), finished_at: None, entries };
         jobs.insert(server.id.clone(), Job { scan: scan.clone(), cancel: cancel.clone() });
@@ -121,7 +121,9 @@ impl UserStorageManager {
                     manager.update(&server.id, |scan| {
                         let entry = &mut scan.entries[index];
                         match outcome {
-                            Ok((canonical, bytes)) => { entry.canonical_path = Some(canonical); entry.status = if bytes.is_some() { "success" } else { "overlap" }.into(); entry.bytes = bytes; entry.checked_at = Some(now()); entry.error = None; }
+                            Ok((canonical, bytes)) => {
+                                entry.previous_bytes = if bytes.is_some() && entry.canonical_path.as_deref() == Some(canonical.as_str()) { entry.bytes } else { None };
+                                entry.canonical_path = Some(canonical); entry.status = if bytes.is_some() { "success" } else { "overlap" }.into(); entry.bytes = bytes; entry.checked_at = Some(now()); entry.error = None; }
                             Err((status, error)) => { entry.status = status; entry.error = Some(error); }
                         }
                     });

@@ -698,8 +698,35 @@ pub async fn sync_direct(database: &Database, project: &Project, target_server_i
         if before.exists { return Err("直接传输要求目标路径不存在，不会覆盖已有数据；请选择新路径或显式选择本机中转".into()); }
         let artifact = sync_artifact_id(project, &destination, &target.path);
         let stage_suffix = format!(".serverdock-{artifact}.part");
-        // Resolve home and relative paths on the destination, never on the source.
-        let prepare = format!(r#"set -eu; command -v rsync >/dev/null || {{ echo '目标未安装 rsync' >&2; exit 69; }}; target={}; {}; case "$target" in /*) ;; *) echo '目标路径必须为绝对路径或 ~/' >&2; exit 64 ;; esac; target=$(realpath -m -- "$target"); [ "$target" != / ] && [ "$target" != "$HOME" ] || exit 64; [ ! -e "$target" ] && [ ! -L "$target" ] || exit 73; parent="${{target%/*}}"; mkdir -p -- "$parent"; stage="$target{}"; [ ! -L "$stage" ] || exit 73; printf '%s\n' "$target""#, shell_quote(&target.path), remote_home_expansion("target"), stage_suffix);
+        // Check the nearest existing parent before creating directories or running rsync.
+        let prepare = format!(r#"set -eu
+command -v rsync >/dev/null || {{ echo '目标未安装 rsync' >&2; exit 69; }}
+target={target}; {expand}
+case "$target" in /*) ;; *) echo '目标路径必须为绝对路径或 ~/' >&2; exit 64 ;; esac
+target=$(realpath -m -- "$target")
+[ "$target" != / ] && [ "$target" != "$HOME" ] || exit 64
+[ ! -e "$target" ] && [ ! -L "$target" ] || {{ echo '目标路径已存在' >&2; exit 73; }}
+parent="${{target%/*}}"; parent="${{parent:-/}}"
+stage="$target{stage_suffix}"
+[ ! -L "$stage" ] || exit 73
+existing="$parent"
+while [ ! -e "$existing" ]; do existing="${{existing%/*}}"; existing="${{existing:-/}}"; done
+[ -d "$existing" ] && [ -w "$existing" ] || {{ echo '目标父目录不可写' >&2; exit 73; }}
+available=$(LC_ALL=C df -Pk -- "$existing" | awk 'NR==2 {{print $4}}')
+case "$available" in ''|*[!0-9]*) echo '无法读取目标磁盘剩余空间' >&2; exit 73 ;; esac
+reusable=0
+if [ -e "$stage" ]; then reusable=$(du -sk -- "$stage" | awk 'NR==1 {{print $1}}'); fi
+case "$reusable" in ''|*[!0-9]*) reusable=0 ;; esac
+if [ "$((available + reusable))" -lt {required_kb} ]; then
+    printf '目标磁盘空间不足：需要约 %s KiB，可用 %s KiB，已有暂存 %s KiB\n' {required_kb} "$available" "$reusable" >&2
+    exit 73
+fi
+mkdir -p -- "$parent"
+printf '%s\n' "$target""#,
+            target = shell_quote(&target.path),
+            expand = remote_home_expansion("target"),
+            required_kb = source_check.size_bytes.div_ceil(1024),
+        );
         let resolved = remote_output(&destination, destination_password.as_deref(), prepare, 30).await?;
         let target_path = resolved.trim();
         if !target_path.starts_with('/') || target_path.chars().any(char::is_control) { return Err("无法解析目标路径".into()); }

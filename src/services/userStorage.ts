@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { api } from './api'
 
 export interface StorageTarget { uid: number; username: string; path: string }
-export interface StorageEntry extends StorageTarget { canonicalPath: string | null; status: string; bytes: number | null; checkedAt: number | null; error: string | null }
+export interface StorageEntry extends StorageTarget { canonicalPath: string | null; status: string; bytes: number | null; previousBytes?: number | null; checkedAt: number | null; error: string | null }
 export interface StorageScan { running: boolean; queued: boolean; startedAt: number; finishedAt: number | null; entries: StorageEntry[] }
 const demo = new Map<string, StorageScan>()
 export const userStorage = {

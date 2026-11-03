@@ -1,3 +1,4 @@
+import { ResourceHistory, recordDiskTrend } from './components/ResourceHistory'
 import { useCallback, useEffect, useRef, useState, type FormEvent, type MouseEvent } from 'react'
 import { ArrowRightLeft, Download, Cpu, Database, HardDrive, LayoutDashboard, Plus, RefreshCw, Server as ServerIcon, Terminal, Settings2 } from 'lucide-react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -34,7 +35,7 @@ export default function ServerDock() {
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [page, setPage] = useState<'overview' | 'transfer'>('overview')
   const [selected, setSelected] = useState<string | null>(null)
-  const [tab, setTab] = useState<'resources' | 'users' | 'processes' | 'terminal'>('resources')
+  const [tab, setTab] = useState<'resources' | 'users' | 'history' | 'processes' | 'terminal'>('resources')
   const [openedTerminals, setOpenedTerminals] = useState<string[]>([])
   const [form, setForm] = useState<Partial<ServerDraft> | null>(null)
   const [hostKey, setHostKey] = useState<HostKeyInfo | null>(null)
@@ -51,11 +52,22 @@ export default function ServerDock() {
   const [targetId, setTargetId] = useState('')
   const [sourcePath, setSourcePath] = useState('')
   const [targetPath, setTargetPath] = useState('')
+  const [queue, setQueue] = useState<{ projectId: string; targetId: string; mode: TransferMode }[]>([])
+  const transferActive = useRef(false)
+  const [transferErrors, setTransferErrors] = useState<Record<string, string>>({})
   const [running, setRunning] = useState<string | null>(null)
   const [transferModes, setTransferModes] = useState<Record<string, TransferMode>>(() => {
     try { const value: unknown = JSON.parse(localStorage.getItem('serverdock.transferModes') ?? '{}'); return value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).filter(([, mode]) => mode === 'direct' || mode === 'relay')) : {} } catch { return {} }
   })
   useEffect(() => { try { localStorage.setItem('serverdock.transferModes', JSON.stringify(transferModes)) } catch { /* Session choices remain usable when storage is unavailable. */ } }, [transferModes])
+  const [alerts, setAlerts] = useState(() => {
+    try { return localStorage.getItem('serverdock.resourceAlerts') === 'true' } catch { return false }
+  })
+  const alertState = useRef(new Map<string, { since: number; last: number; notified: boolean }>())
+  useEffect(() => {
+    alertState.current.clear()
+    try { localStorage.setItem('serverdock.resourceAlerts', String(alerts)) } catch { /* Session preference. */ }
+  }, [alerts])
   const collecting = useRef(new Set<string>())
   const attempts = useRef<Record<string, number>>({})
   const diskAttempts = useRef<Record<string, number>>({})
@@ -101,11 +113,38 @@ export default function ServerDock() {
     try {
       const next = await serverdock.collect(server.id, disks)
       if (!alive.current) return
+      if (api.isDesktop && disks) recordDiskTrend(server.id, next)
+      if (api.isDesktop && alerts) {
+        const metrics = [
+          { name: 'CPU', value: next.system.cpuUtilization, gap: Math.max(30, server.samplingIntervalSeconds * 3) },
+          { name: '内存', value: percent(next.system.memoryUsedBytes, next.system.memoryTotalBytes), gap: Math.max(30, server.samplingIntervalSeconds * 3) },
+        ]
+        if (disks) {
+          for (const disk of next.disks ?? []) {
+            if (disk.totalBytes > 0) metrics.push({ name: `存储 ${disk.mountPoint}`, value: percent(disk.usedBytes, disk.totalBytes), gap: 150 })
+          }
+        }
+        for (const { name, value, gap } of metrics) {
+          const key = server.id + ':' + name
+          if (value < 90) { alertState.current.delete(key); continue }
+          const previous = alertState.current.get(key)
+          const now = next.timestamp
+          const state = previous && now - previous.last <= gap ? previous : { since: now, last: now, notified: false }
+          state.last = now
+          if (!state.notified && now - state.since >= 300) {
+            state.notified = true
+            void api.notify('ServerDock 资源异常', `${server.name} 的${name}使用率已连续五分钟达到 90%，当前 ${value.toFixed(1)}%。`).catch(console.error)
+          }
+          alertState.current.set(key, state)
+        }
+      }
       setSnapshots(current => ({ ...current, [server.id]: { ...next, disks: disks ? next.disks : current[server.id]?.disks } }))
       setErrors(current => { const copy = { ...current }; delete copy[server.id]; return copy })
-    } catch (error) { if (alive.current) setErrors(current => ({ ...current, [server.id]: message(error) })) }
+    } catch (error) {
+      for (const key of alertState.current.keys()) if (key.startsWith(server.id + ':')) alertState.current.delete(key)
+      if (alive.current) setErrors(current => ({ ...current, [server.id]: message(error) })) }
     finally { collecting.current.delete(server.id) }
-  }, [])
+  }, [alerts])
 
   useEffect(() => {
     alive.current = true
@@ -148,17 +187,38 @@ export default function ServerDock() {
     setBusy(true)
     try { setHostKey(await api.scanHostKey(id)) } catch (error) { setNotice(message(error)) } finally { setBusy(false) }
   }
-  const startTransfer = async (project: Project, chosenMode: TransferMode) => {
+  const startTransfer = (project: Project, chosenMode: TransferMode) => {
     const target = project.targets[0]
-    if (!target || running) return
+    if (!target || running === project.id) return
     setTransferModes(current => ({ ...current, [project.id]: chosenMode }))
-    setRunning(project.id); setNotice('')
-    try {
-      await serverdock.transfer(project.id, target.serverId, chosenMode)
-      setNotice('传输完成，已验证目标。')
-    } catch (error) { setNotice(`${message(error)}${chosenMode === 'direct' ? '；可选择本机中转后重试。' : ''}`) }
-    finally { setRunning(null); await refreshLists().catch(error => setNotice(message(error))) }
+    setQueue(current => current.some(item => item.projectId === project.id)
+      ? current
+      : [...current, { projectId: project.id, targetId: target.serverId, mode: chosenMode }])
   }
+
+  useEffect(() => {
+    const job = queue[0]
+    if (!job || transferActive.current) return
+    transferActive.current = true
+    setRunning(job.projectId)
+    setTransferErrors(current => { const next = { ...current }; delete next[job.projectId]; return next })
+    setNotice('')
+    void (async () => {
+      try {
+        await serverdock.transfer(job.projectId, job.targetId, job.mode)
+        setNotice('传输完成，已验证目标。')
+      } catch (error) {
+        setTransferErrors(current => ({ ...current, [job.projectId]: message(error) }))
+        setNotice(`${message(error)}${job.mode === 'direct' ? '；可选择本机中转后重试。' : ''}`)
+      } finally {
+        await refreshLists().catch(error => setNotice(message(error)))
+        transferActive.current = false
+        setRunning(null)
+        setQueue(current => current.filter(item => item.projectId !== job.projectId))
+      }
+    })()
+  }, [queue, refreshLists])
+
   const submitTransfer = async (event: FormEvent) => {
     event.preventDefault()
     if (sourceId === targetId) { setNotice('请选择两台不同的服务器。'); return }
@@ -166,12 +226,13 @@ export default function ServerDock() {
     setBusy(true)
     try {
       const project = await api.saveProject({ name: sourcePath.split('/').filter(Boolean).at(-1) ?? '文件传输', kind: 'project', sourceServerId: sourceId, sourcePath, datasetIds: [], modelIds: [], targets: [{ serverId: targetId, path: targetPath }] })
-      await refreshLists(); await startTransfer(project, mode)
+      startTransfer(project, mode)
+      await refreshLists()
     } catch (error) { setNotice(message(error)) } finally { setBusy(false) }
   }
 
   const removeConnection = async (item: Server) => {
-    if (!api.isDesktop || busy || running) return
+    if (!api.isDesktop || busy || queue.length) return
     const linked = projects.some(project => project.sourceServerId === item.id || project.targets.some(target => target.serverId === item.id))
     if (!window.confirm(`从 ServerDock 移除“${item.name}”？\n本机连接配置和采样记录将删除，服务器上的文件和 SSH 授权保留。${linked ? '\n引用此服务器的传输记录将保留，但不能再使用此连接重试。' : ''}`)) return
     setBusy(true)
@@ -217,13 +278,14 @@ export default function ServerDock() {
         <form className="sd-panel sd-transfer-form" onSubmit={event => void submitTransfer(event)}><h2>新建传输</h2><div className="sd-transfer-columns">
           <div><label>源服务器<select required value={sourceId} onChange={event => setSourceId(event.target.value)}><option value="">选择服务器</option>{servers.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label>源文件或目录<input required value={sourcePath} onChange={event => setSourcePath(event.target.value)} placeholder="/data/research" /></label></div>
           <ArrowRightLeft size={24} /><div><label>目标服务器<select required value={targetId} onChange={event => setTargetId(event.target.value)}><option value="">选择服务器</option>{servers.filter(item => item.id !== sourceId).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label>目标完整路径<input required value={targetPath} onChange={event => setTargetPath(event.target.value)} placeholder="/data/research-copy" /></label></div>
-        </div><label>传输方式<select value={mode} onChange={event => setMode(event.target.value as TransferMode)}><option value="direct">服务器直接传输</option><option value="relay">本机中转</option></select></label><p>{mode === 'direct' ? '两端需安装 rsync，源服务器须已能使用自己的 SSH 密钥连接目标并信任其指纹。不会复制本机私钥或转发 SSH Agent。目标路径须不存在。' : '两端只需分别能从本机通过 SSH 访问。数据经过本机网络，复用项目同步的冲突检查与断点续传。'}</p><button className="sd-primary" disabled={busy || !!running} type="submit">{busy || running ? '传输处理中…' : '开始传输'}</button></form>
-        <section className="sd-panel"><h2>传输记录</h2>{projects.length === 0 && <p>还没有传输任务。</p>}{projects.map(project => { const item = progress.find(item => item.projectId === project.id); const chosenMode = transferModes[project.id] ?? 'direct'; return <div className="sd-job" key={project.id}><div><strong>{project.name}</strong><small>{servers.find(item => item.id === project.sourceServerId)?.name ?? '源服务器已移除'} → {servers.find(item => item.id === project.targets[0]?.serverId)?.name ?? '目标服务器已移除'}</small><small>{project.sourcePath} → {project.targets[0]?.path}</small><span>{project.lastError ?? project.targets[0]?.error ?? ({ synced: '已完成', syncing: '传输中', paused: '已暂停', error: '失败' }[project.status as string] ?? '待传输')}</span>{item && <><progress max={Math.max(1, item.totalBytes)} value={item.transferredBytes} /><small>{bytes(item.transferredBytes)} / {bytes(item.totalBytes)} · {item.state}</small></>}</div><div><select aria-label={`${project.name}传输方式`} disabled={!!running} value={chosenMode} onChange={event => setTransferModes(current => ({ ...current, [project.id]: event.target.value as TransferMode }))}><option value="direct">直接传输</option><option value="relay">本机中转</option></select>{running === project.id ? <button onClick={() => void api.cancelProjectSync(project.id, project.targets[0].serverId).catch(error => setNotice(message(error)))}>暂停</button> : <button disabled={busy || !!running || !servers.some(item => item.id === project.sourceServerId) || !servers.some(item => item.id === project.targets[0]?.serverId)} onClick={() => void startTransfer(project, chosenMode)}>重试 / 继续</button>}</div></div> })}</section>
+        </div><label>传输方式<select value={mode} onChange={event => setMode(event.target.value as TransferMode)}><option value="direct">服务器直接传输</option><option value="relay">本机中转</option></select></label><p>{mode === 'direct' ? '两端需安装 rsync，源服务器须已能使用自己的 SSH 密钥连接目标并信任其指纹。不会复制本机私钥或转发 SSH Agent。目标路径须不存在。' : '两端只需分别能从本机通过 SSH 访问。数据经过本机网络，复用项目同步的冲突检查与断点续传。'}</p><button className="sd-primary" disabled={busy} type="submit">{busy ? '正在保存…' : running ? '加入传输队列' : '开始传输'}</button></form>
+        <section className="sd-panel"><h2>传输记录</h2>{queue.length > 0 && <p>按加入顺序执行 · {Math.max(0, queue.length - (running ? 1 : 0))} 项等待 · 执行前检查路径和空间</p>}{projects.length === 0 && <p>还没有传输任务。</p>}{projects.map(project => { const item = progress.find(item => item.projectId === project.id); const chosenMode = transferModes[project.id] ?? 'direct'; return <div className="sd-job" key={project.id}><div><strong>{project.name}</strong><small>{servers.find(item => item.id === project.sourceServerId)?.name ?? '源服务器已移除'} → {servers.find(item => item.id === project.targets[0]?.serverId)?.name ?? '目标服务器已移除'}</small><small>{project.sourcePath} → {project.targets[0]?.path}</small><span>{queue.some(job => job.projectId === project.id) && running !== project.id ? '排队中' : running === project.id ? (item?.state === 'transferring' ? '传输中' : item?.state === 'publishing' ? '发布目标文件' : '正在预检') : transferErrors[project.id] ?? project.lastError ?? project.targets[0]?.error ?? ({ synced: '已完成', syncing: '传输中', paused: '已暂停', error: '失败' }[project.status as string] ?? '待传输')}</span>{item && <><progress max={Math.max(1, item.totalBytes)} value={item.transferredBytes} /><small>{bytes(item.transferredBytes)} / {bytes(item.totalBytes)} · {item.state}</small></>}</div><div><select aria-label={`${project.name}传输方式`} disabled={queue.some(job => job.projectId === project.id)} value={chosenMode} onChange={event => setTransferModes(current => ({ ...current, [project.id]: event.target.value as TransferMode }))}><option value="direct">直接传输</option><option value="relay">本机中转</option></select>{running === project.id ? <button onClick={() => void api.cancelProjectSync(project.id, project.targets[0].serverId).catch(error => setNotice(message(error)))}>暂停</button> : queue.some(job => job.projectId === project.id) ? <button onClick={() => setQueue(current => current.filter(job => job.projectId !== project.id))}>取消排队</button> : <button disabled={busy || !servers.some(item => item.id === project.sourceServerId) || !servers.some(item => item.id === project.targets[0]?.serverId)} onClick={() => void startTransfer(project, chosenMode)}>重试 / 继续</button>}</div></div> })}</section>
       </> : server ? <>
-        <div className="sd-heading"><div><span className="sd-eyebrow">SERVER DETAILS</span><h1>{server.name}</h1><p>{server.username}@{server.host}:{server.port} · {snapshot?.osName ?? '等待采样'}</p></div><div className="sd-actions"><button onClick={() => setForm({ ...server, location: server.location ?? undefined, sshAlias: server.sshAlias ?? undefined, identityFile: server.identityFile ?? undefined, proxyJump: server.proxyJump ?? undefined })}><Settings2 size={16} />编辑连接</button>{api.isDesktop && <button className="sd-remove" disabled={busy || !!running} onClick={() => void removeConnection(server)}>移除服务器</button>}<button disabled={busy} onClick={() => void verifyHost(server.id)}>核验主机指纹</button><button onClick={() => void collect(server, true)}><RefreshCw size={16} />刷新</button></div></div>
+        <div className="sd-heading"><div><span className="sd-eyebrow">SERVER DETAILS</span><h1>{server.name}</h1><p>{server.username}@{server.host}:{server.port} · {snapshot?.osName ?? '等待采样'}</p></div><div className="sd-actions"><button onClick={() => setForm({ ...server, location: server.location ?? undefined, sshAlias: server.sshAlias ?? undefined, identityFile: server.identityFile ?? undefined, proxyJump: server.proxyJump ?? undefined })}><Settings2 size={16} />编辑连接</button>{api.isDesktop && <button className="sd-remove" disabled={busy || queue.length > 0} onClick={() => void removeConnection(server)}>移除服务器</button>}<button disabled={busy} onClick={() => void verifyHost(server.id)}>核验主机指纹</button><button onClick={() => void collect(server, true)}><RefreshCw size={16} />刷新</button></div></div>
         {errors[server.id] && <div role="alert" className="sd-notice">连接失败：{errors[server.id]}。首次连接请先核验主机指纹。</div>}
-        <div className="sd-tabs">{(['resources', 'users', 'processes', 'terminal'] as const).map(value => <button key={value} className={tab === value ? 'active' : ''} onClick={() => setTab(value)}>{({ resources: '资源监控', users: '用户资源', processes: '进程', terminal: 'SSH 终端' })[value]}</button>)}</div>
+        <div className="sd-tabs">{(['resources', 'users', 'history', 'processes', 'terminal'] as const).map(value => <button key={value} className={tab === value ? 'active' : ''} onClick={() => setTab(value)}>{({ resources: '资源监控', users: '用户资源', history: '历史趋势', processes: '进程', terminal: 'SSH 终端' })[value]}</button>)}</div>
         {tab === 'resources' && (snapshot ? <><div className="sd-resource-grid"><section className="sd-panel"><Cpu /><h2>CPU</h2><Meter label="CPU 使用率" value={snapshot.system.cpuUtilization} detail={snapshot.system.cpuModel} /><p>负载 1 / 5 / 15 分钟</p><strong>{snapshot.system.load1.toFixed(2)} / {snapshot.system.load5.toFixed(2)} / {snapshot.system.load15.toFixed(2)}</strong></section><section className="sd-panel"><Database /><h2>内存</h2><Meter label="物理内存" value={percent(snapshot.system.memoryUsedBytes, snapshot.system.memoryTotalBytes)} detail={`${bytes(snapshot.system.memoryUsedBytes)} / ${bytes(snapshot.system.memoryTotalBytes)}`} /><Meter label="Swap" value={percent(snapshot.system.swapUsedBytes, snapshot.system.swapTotalBytes)} detail={`${bytes(snapshot.system.swapUsedBytes)} / ${bytes(snapshot.system.swapTotalBytes)}`} /></section></div><section className="sd-panel"><h2><HardDrive size={20} />存储容量</h2>{snapshot.disks?.length ? snapshot.disks.map(disk => <Meter key={disk.mountPoint} label={disk.mountPoint} value={percent(disk.usedBytes, disk.totalBytes)} detail={`已用 ${bytes(disk.usedBytes)} / ${bytes(disk.totalBytes)} · 可用 ${bytes(disk.availableBytes)}`} />) : <p>尚无挂载点数据。</p>}<small>磁盘容量每 60 秒采样；手动刷新可立即更新。</small></section></> : <div className="sd-panel">正在读取服务器资源…</div>)}
+        {tab === 'history' && <ResourceHistory key={server.id} serverId={server.id} alerts={alerts} onAlertsChange={setAlerts} />}
         {tab === 'users' && <UserResources snapshot={snapshot} serverId={server.id} />}
         {tab === 'processes' && <section className="sd-panel"><h2>CPU 与内存进程</h2><div className="sd-table-wrap"><table><thead><tr><th>PID</th><th>用户</th><th>CPU</th><th>内存</th><th>运行时间</th><th>命令</th></tr></thead><tbody>{snapshot?.cpuProcesses.map(process => <tr key={process.pid}><td>{process.pid}</td><td>{process.username}</td><td>{process.cpuPercent.toFixed(1)}%</td><td>{bytes(process.memoryUsedBytes)}</td><td>{process.elapsed}</td><td title={process.command}>{process.command}</td></tr>)}</tbody></table></div>{!snapshot?.cpuProcesses.length && <p>尚无进程采样。</p>}<small>CPU 百分比按单个逻辑核心计，可超过 100%。</small></section>}
       </> : <>

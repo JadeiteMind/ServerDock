@@ -66,6 +66,24 @@ describe('ServerDock CPU workspace', () => {
       expect(button('archive')).toBeDefined()
     } finally { confirm.mockRestore() }
   })
+  it('starts queued transfers in order and retains the first failure', async () => {
+    const second = { ...project, id: 'second', name: 'second' }
+    vi.mocked(serverdock.projects).mockResolvedValue([project, second])
+    let rejectFirst!: (error: Error) => void
+    vi.mocked(serverdock.transfer)
+      .mockImplementationOnce(() => new Promise((_, reject) => { rejectFirst = reject }))
+      .mockResolvedValueOnce(undefined)
+    await act(async () => root.render(<ServerDock />)); await flush()
+    act(() => button('数据传输').click())
+    const retry = () => [...container.querySelectorAll('button')].find(item => item.textContent === '重试 / 继续')!
+    await act(async () => retry().click()); await flush()
+    await act(async () => retry().click()); await flush()
+    expect(serverdock.transfer).toHaveBeenCalledTimes(1)
+    expect(container.textContent).toContain('排队中')
+    await act(async () => rejectFirst(new Error('目标磁盘空间不足'))); await flush()
+    expect(serverdock.transfer).toHaveBeenNthCalledWith(2, 'second', 'b', 'direct')
+    expect(container.textContent).toContain('目标磁盘空间不足')
+  })
   it('shows used and total storage in the fleet and server card', async () => {
     await act(async () => root.render(<ServerDock />)); await flush()
     expect(container.querySelector('.sd-capacity')?.textContent).toContain('20.0 GiB / 200.0 GiB')
