@@ -1260,8 +1260,15 @@ fn build_tray_menu(
 ) -> Result<Menu<tauri::Wry>, Box<dyn std::error::Error>> {
     let open = MenuItemBuilder::with_id("open", "打开 ServerDock").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
+    let hide = MenuItemBuilder::with_id("hide", "最小化到托盘").build(app)?;
+    let summary = app.state::<ServerDockTrayState>();
     Ok(MenuBuilder::new(app)
         .item(&open)
+        .item(&hide)
+        .separator()
+        .item(&summary.servers)
+        .item(&summary.resources)
+        .item(&summary.updated)
         .separator()
         .item(&quit)
         .build()?)
@@ -1333,6 +1340,31 @@ fn build_application_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, Box<dyn s
     Ok(MenuBuilder::new(app)
         .items(&[&racktop, &edit, &servers, &view, &window, &help])
         .build()?)
+}
+
+struct ServerDockTrayState {
+    servers: tauri::menu::MenuItem<tauri::Wry>,
+    resources: tauri::menu::MenuItem<tauri::Wry>,
+    updated: tauri::menu::MenuItem<tauri::Wry>,
+    previous: Mutex<String>,
+}
+
+#[tauri::command]
+fn update_serverdock_tray(app: AppHandle, summary: String) -> Result<(), String> {
+    if summary.len() > 1024 || summary.contains('\0') || summary.lines().count() != 3 {
+        return Err("托盘摘要格式无效".into());
+    }
+    let state = app.state::<ServerDockTrayState>();
+    let mut previous = state.previous.lock().map_err(|e| e.to_string())?;
+    if *previous == summary { return Ok(()); }
+    let lines: Vec<_> = summary.lines().collect();
+    state.servers.set_text(lines[0]).map_err(|e| e.to_string())?;
+    state.resources.set_text(lines[1]).map_err(|e| e.to_string())?;
+    state.updated.set_text(lines[2]).map_err(|e| e.to_string())?;
+    app.tray_by_id("racktop-tray").ok_or("找不到托盘图标")?
+        .set_tooltip(Some(format!("ServerDock\n{summary}"))).map_err(|e| e.to_string())?;
+    *previous = summary;
+    Ok(())
 }
 
 #[derive(Default)]
@@ -1486,6 +1518,12 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_menu(build_application_menu(&app.handle())?)?;
 
+            app.manage(ServerDockTrayState {
+                servers: MenuItemBuilder::with_id("summary-servers", "服务器：等待采样").enabled(false).build(app)?,
+                resources: MenuItemBuilder::with_id("summary-resources", "CPU / 内存：等待采样").enabled(false).build(app)?,
+                updated: MenuItemBuilder::with_id("summary-updated", "关闭窗口后仍在后台监控").enabled(false).build(app)?,
+                previous: Mutex::new(String::new()),
+            });
             app.manage(TraySummaryState(Mutex::new(Some(("compact".into(), 0, 0)))));
             let menu = build_tray_menu(&app.handle(), 0, 0)?;
             TrayIconBuilder::with_id("racktop-tray")
@@ -1517,9 +1555,13 @@ pub fn run() {
                     "open" | "reservations" | "mine-processes" => {
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.show();
+                            let _ = window.unminimize();
                             let _ = window.set_focus();
                         }
                         let _ = app.emit("tray-action", event.id().as_ref());
+                    }
+                    "hide" => {
+                        if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
                     }
                     "quit" => {
                         app.state::<TerminalManager>().close_all();
@@ -1547,8 +1589,11 @@ pub fn run() {
             _ => {}
         })
         .on_window_event(|window, event| {
-            if matches!(event, WindowEvent::CloseRequested { .. }) {
-                window.app_handle().state::<TerminalManager>().close_all();
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -1595,6 +1640,7 @@ pub fn run() {
             trust_host_key,
             terminate_process,
             update_tray_summary,
+            update_serverdock_tray,
             window_minimize,
             window_toggle_maximize,
             window_close

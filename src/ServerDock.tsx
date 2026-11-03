@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent, type MouseEvent } from 'react'
 import { ArrowRightLeft, Download, Cpu, Database, HardDrive, LayoutDashboard, Plus, RefreshCw, Server as ServerIcon, Terminal, Settings2 } from 'lucide-react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { api } from './services/api'
 import { serverdock, type TransferMode } from './services/serverdock'
@@ -17,6 +18,14 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
 
 function Meter({ label, value, detail }: { label: string; value: number; detail?: string }) {
   return <div className="sd-meter"><div><span>{label}</span><strong>{value.toFixed(1)}%</strong></div><progress aria-label={label} max={100} value={value} /><small>{detail}</small></div>
+}
+
+function windowChromeAction(event: MouseEvent<HTMLElement>, maximize = false) {
+  if (!api.isDesktop || event.button !== 0) return
+  if ((event.target as Element).closest('button, input, select, textarea, a, [role="button"]')) return
+  if (!maximize && event.detail > 1) return
+  event.preventDefault()
+  void (maximize ? getCurrentWindow().toggleMaximize() : getCurrentWindow().startDragging()).catch(console.error)
 }
 
 export default function ServerDock() {
@@ -169,14 +178,19 @@ export default function ServerDock() {
   const usedMemory = currentSnapshots.reduce((sum, item) => sum + item.system.memoryUsedBytes, 0)
   const disks = currentSnapshots.flatMap(item => item.disks ?? [])
 
+  const traySummary = `${online.length} / ${servers.length} 台在线 · ${Object.keys(errors).length} 台连接失败\n${currentSnapshots.length ? `平均 CPU ${(currentSnapshots.reduce((sum, item) => sum + item.system.cpuUtilization, 0) / currentSnapshots.length).toFixed(1)}% · 内存 ${percent(usedMemory, totalMemory).toFixed(1)}%` : 'CPU / 内存：等待采样'}\n${currentSnapshots.length ? `最近采样 ${new Date(Math.max(...currentSnapshots.map(item => item.timestamp)) * 1000).toLocaleTimeString()}` : '等待首次采样'} · 后台监控`
+  useEffect(() => {
+    if (api.isDesktop) void invoke('update_serverdock_tray', { summary: traySummary }).catch(console.error)
+  }, [traySummary])
+
   return <div className="sd-app">
-    <aside className="sd-sidebar"><div className="sd-brand" data-tauri-drag-region><ServerIcon size={26} /><div>ServerDock<small>LINUX SERVER WORKSPACE</small></div></div>
+    <aside className="sd-sidebar"><div className="sd-brand sd-window-drag" onMouseDown={windowChromeAction} onDoubleClick={event => windowChromeAction(event, true)}><ServerIcon size={26} /><div>ServerDock<small>LINUX SERVER WORKSPACE</small></div></div>
       <nav aria-label="主导航"><button className={page === 'overview' ? 'active' : ''} onClick={() => { setPage('overview'); setSelected(null) }}><LayoutDashboard size={18} />服务器总览</button><button className={page === 'transfer' ? 'active' : ''} onClick={() => { setPage('transfer'); setSelected(null) }}><ArrowRightLeft size={18} />数据传输</button></nav>
       <div className="sd-sidebar-label">服务器 <span>{servers.length}</span></div>
       <div className="sd-server-list">{servers.map(item => <button key={item.id} className={selected === item.id ? 'active' : ''} onClick={() => { setPage('overview'); setSelected(item.id); setTab('resources') }}><span className={`sd-dot ${errors[item.id] ? 'bad' : snapshots[item.id] ? 'good' : ''}`} />{item.name}</button>)}</div>
       <button disabled={importingConfig} onClick={() => void importConfig()}><Download size={17} />{importingConfig ? '正在读取…' : '导入 SSH Config'}</button><button className="sd-add" onClick={() => setForm({})}><Plus size={17} />添加服务器</button><footer>CPU · 内存 · 存储<br />基于 RackTop · GPL-3.0</footer>
     </aside>
-    <main className="sd-main"><header className="sd-topbar"><span data-tauri-drag-region>工作台 / {page === 'transfer' ? '数据传输' : server?.name ?? '服务器总览'}</span><div>{!api.isDesktop && <span className="sd-badge">演示数据</span>}{api.isDesktop && <><button aria-label="最小化" onClick={() => void getCurrentWindow().minimize()}>−</button><button aria-label="最大化或还原" onClick={() => void getCurrentWindow().toggleMaximize()}>□</button><button aria-label="关闭窗口" onClick={() => void getCurrentWindow().close()}>×</button></>}</div></header>
+    <main className="sd-main"><header className="sd-topbar sd-window-drag" onMouseDown={windowChromeAction} onDoubleClick={event => windowChromeAction(event, true)}><span>工作台 / {page === 'transfer' ? '数据传输' : server?.name ?? '服务器总览'}</span><div>{!api.isDesktop && <span className="sd-badge">演示数据</span>}{api.isDesktop && <><button aria-label="最小化" onClick={() => void getCurrentWindow().minimize()}>−</button><button aria-label="最大化或还原" onClick={() => void getCurrentWindow().toggleMaximize()}>□</button><button title="隐藏到托盘，继续监控；右键托盘图标可退出" aria-label="关闭窗口" onClick={() => void getCurrentWindow().close()}>×</button></>}</div></header>
       <div className="sd-content">
       {notice && <div role="status" className="sd-notice"><span>{notice}</span><button aria-label="关闭提示" onClick={() => setNotice('')}>×</button></div>}
       {page === 'transfer' ? <>

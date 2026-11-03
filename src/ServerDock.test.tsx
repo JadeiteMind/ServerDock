@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import { createRoot } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ServerDock from './ServerDock'
@@ -8,7 +9,10 @@ import { serverdock } from './services/serverdock'
 import { ServerForm } from './components/ServerForm'
 import type { Project, Server, Snapshot } from './types/models'
 
+const windowMocks = vi.hoisted(() => ({ startDragging: vi.fn(async () => {}), toggleMaximize: vi.fn(async () => {}), minimize: vi.fn(async () => {}), close: vi.fn(async () => {}) }))
+vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => windowMocks }))
 vi.mock('./components/SshTerminal', () => ({ SshTerminal: () => <div>terminal</div> }))
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => {}) }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))
 vi.mock('./services/api', () => ({ api: { isDesktop: true, listProjectSyncProgress: vi.fn(async () => []), saveProject: vi.fn(), cancelProjectSync: vi.fn(), importSshConfig: vi.fn(), saveServer: vi.fn() } }))
 vi.mock('./services/serverdock', () => ({ serverdock: { servers: vi.fn(), projects: vi.fn(), collect: vi.fn(), transfer: vi.fn() } }))
@@ -30,6 +34,23 @@ beforeEach(() => {
 afterEach(() => { act(() => root.unmount()); container.remove() })
 
 describe('ServerDock CPU workspace', () => {
+  it('drags from titlebar whitespace and nested branding without intercepting controls', async () => {
+    await act(async () => root.render(<ServerDock />)); await flush()
+    const header = container.querySelector('.sd-topbar')!
+    act(() => header.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, detail: 1 })))
+    expect(windowMocks.startDragging).toHaveBeenCalledTimes(1)
+    act(() => container.querySelector('.sd-brand small')!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, detail: 1 })))
+    expect(windowMocks.startDragging).toHaveBeenCalledTimes(2)
+    act(() => container.querySelector('[aria-label="最小化"]')!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, detail: 1 })))
+    expect(windowMocks.startDragging).toHaveBeenCalledTimes(2)
+    act(() => header.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, button: 0, detail: 2 })))
+    expect(windowMocks.toggleMaximize).toHaveBeenCalledTimes(1)
+  })
+  it('publishes fleet resource and failure summaries to the tray', async () => {
+    vi.mocked(serverdock.collect).mockImplementation(async id => { if (id === 'b') throw new Error('offline'); return sample })
+    await act(async () => root.render(<ServerDock />)); await flush()
+    expect(invoke).toHaveBeenLastCalledWith('update_serverdock_tray', { summary: expect.stringContaining('1 / 2 台在线 · 1 台连接失败\n平均 CPU 35.0% · 内存 25.0%') })
+  })
   it('shows used and total storage in the fleet and server card', async () => {
     await act(async () => root.render(<ServerDock />)); await flush()
     expect(container.querySelector('.sd-capacity')?.textContent).toContain('20.0 GiB / 200.0 GiB')
