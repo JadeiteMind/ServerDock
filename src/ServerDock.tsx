@@ -1,3 +1,4 @@
+import { WorkbenchServers } from './components/WorkbenchServers'
 import { ResourceHistory, recordDiskTrend } from './components/ResourceHistory'
 import { useCallback, useEffect, useRef, useState, type FormEvent, type MouseEvent } from 'react'
 import { ArrowRightLeft, Download, Cpu, Database, HardDrive, LayoutDashboard, Plus, RefreshCw, Server as ServerIcon, Terminal, Settings2 } from 'lucide-react'
@@ -33,7 +34,7 @@ export default function ServerDock() {
   const [servers, setServers] = useState<Server[]>([])
   const [snapshots, setSnapshots] = useState<Record<string, Snapshot>>({})
   const [errors, setErrors] = useState<Record<string, string>>({})
-  const [page, setPage] = useState<'overview' | 'transfer'>('overview')
+  const [page, setPage] = useState<'overview' | 'transfer' | 'vps'>('overview')
   const [selected, setSelected] = useState<string | null>(null)
   const [tab, setTab] = useState<'resources' | 'users' | 'history' | 'processes' | 'terminal'>('resources')
   const [openedTerminals, setOpenedTerminals] = useState<string[]>([])
@@ -265,15 +266,15 @@ export default function ServerDock() {
 
   return <div className="sd-app">
     <aside className="sd-sidebar"><div className="sd-brand sd-window-drag" onMouseDown={windowChromeAction} onDoubleClick={event => windowChromeAction(event, true)}><ServerIcon size={26} /><div>ServerDock<small>LINUX SERVER WORKSPACE</small></div></div>
-      <nav aria-label="主导航"><button className={page === 'overview' ? 'active' : ''} onClick={() => { setPage('overview'); setSelected(null) }}><LayoutDashboard size={18} />服务器总览</button><button className={page === 'transfer' ? 'active' : ''} onClick={() => { setPage('transfer'); setSelected(null) }}><ArrowRightLeft size={18} />数据传输</button></nav>
+      <nav aria-label="主导航"><button className={page === 'overview' ? 'active' : ''} onClick={() => { setPage('overview'); setSelected(null) }}><LayoutDashboard size={18} />服务器总览</button><button className={page === 'transfer' ? 'active' : ''} onClick={() => { setPage('transfer'); setSelected(null) }}><ArrowRightLeft size={18} />数据传输</button><button className={page === 'vps' ? 'active' : ''} onClick={() => { setPage('vps'); setSelected(null) }}><ServerIcon size={18} />VPS / 阿里云 ECS</button></nav>
       <div className="sd-sidebar-label">服务器 <span>{servers.length}</span></div>
       <div className="sd-server-list">{servers.map(item => <button key={item.id} className={selected === item.id ? 'active' : ''} onClick={() => { setPage('overview'); setSelected(item.id); setTab('resources') }}><span className={`sd-dot ${errors[item.id] ? 'bad' : snapshots[item.id] ? 'good' : ''}`} />{item.name}</button>)}</div>
       <button disabled={importingConfig} onClick={() => void importConfig()}><Download size={17} />{importingConfig ? '正在读取…' : '导入 SSH Config'}</button><button className="sd-add" onClick={() => setForm({})}><Plus size={17} />添加服务器</button><footer>CPU · 内存 · 存储<br />基于 RackTop · GPL-3.0</footer>
     </aside>
-    <main className="sd-main"><header className="sd-topbar sd-window-drag" onMouseDown={windowChromeAction} onDoubleClick={event => windowChromeAction(event, true)}><span>工作台 / {page === 'transfer' ? '数据传输' : server?.name ?? '服务器总览'}</span><div>{!api.isDesktop && <span className="sd-badge">演示数据</span>}{api.isDesktop && <><button aria-label="最小化" onClick={() => void getCurrentWindow().minimize()}>−</button><button aria-label="最大化或还原" onClick={() => void getCurrentWindow().toggleMaximize()}>□</button><button title="隐藏到托盘，继续监控；右键托盘图标可退出" aria-label="关闭窗口" onClick={() => void getCurrentWindow().close()}>×</button></>}</div></header>
+    <main className="sd-main"><header className="sd-topbar sd-window-drag" onMouseDown={windowChromeAction} onDoubleClick={event => windowChromeAction(event, true)}><span>工作台 / {page === 'vps' ? 'VPS / 阿里云 ECS' : page === 'transfer' ? '数据传输' : server?.name ?? '服务器总览'}</span><div>{!api.isDesktop && <span className="sd-badge">演示数据</span>}{api.isDesktop && <><button aria-label="最小化" onClick={() => void getCurrentWindow().minimize()}>−</button><button aria-label="最大化或还原" onClick={() => void getCurrentWindow().toggleMaximize()}>□</button><button title="隐藏到托盘，继续监控；右键托盘图标可退出" aria-label="关闭窗口" onClick={() => void getCurrentWindow().close()}>×</button></>}</div></header>
       <div className="sd-content">
       {notice && <div role="status" className="sd-notice"><span>{notice}</span><button aria-label="关闭提示" onClick={() => setNotice('')}>×</button></div>}
-      {page === 'transfer' ? <>
+      {page === 'vps' ? <WorkbenchServers /> : page === 'transfer' ? <>
         <div className="sd-heading"><div><span className="sd-eyebrow">DATA TRANSFER</span><h1>让数据在服务器之间流动</h1><p>直接传输优先，也可以选择通过这台电脑中转。</p></div><ArrowRightLeft size={32} /></div>
         <form className="sd-panel sd-transfer-form" onSubmit={event => void submitTransfer(event)}><h2>新建传输</h2><div className="sd-transfer-columns">
           <div><label>源服务器<select required value={sourceId} onChange={event => setSourceId(event.target.value)}><option value="">选择服务器</option>{servers.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label>源文件或目录<input required value={sourcePath} onChange={event => setSourcePath(event.target.value)} placeholder="/data/research" /></label></div>

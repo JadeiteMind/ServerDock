@@ -1,3 +1,4 @@
+mod workbench;
 mod app_update;
 #[cfg(target_os = "linux")]
 mod linux_app_update;
@@ -1603,6 +1604,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_servers,
+            workbench::list_workbench_instances,
+            workbench::collect_workbench_instance,
             save_server,
             list_server_notification_settings,
             save_server_notification_settings,
