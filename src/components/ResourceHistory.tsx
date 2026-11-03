@@ -17,7 +17,7 @@ export function recordDiskTrend(id: string, sample: Snapshot) {
   const points = diskPoints(id).filter(point => point.timestamp > timestamp - day && point.timestamp < timestamp)
   try { localStorage.setItem(diskKey(id), JSON.stringify([...points, { timestamp, value }].slice(-1500))) } catch { /* Storage may be unavailable. */ }
 }
-function Trend({ title, points, end }: { title: string; points: Point[]; end: number }) {
+export function Trend({ title, points, end }: { title: string; points: Point[]; end: number }) {
   const coordinates = points.map(point => {
     const x = (point.timestamp - end + day) * 600 / day
     return [x, 100 - Math.max(0, Math.min(100, point.value))]

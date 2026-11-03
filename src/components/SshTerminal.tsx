@@ -13,7 +13,7 @@ interface TerminalEvent { sessionId: string; data?: string }
 
 const HIDDEN_TERMINAL_TIMEOUT_MS = 60 * 60 * 1000
 
-export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor = 'nvidia', onNotice, active = true }: { serverId: string; serverName: string; gpuIndex?: number; acceleratorVendor?: 'nvidia' | 'ascend' | 'ppu'; onNotice?: (message: string) => void; active?: boolean }) {
+export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor = 'nvidia', onNotice, active = true, startSession }: { startSession?: (columns: number, rows: number) => Promise<string>; serverId: string; serverName: string; gpuIndex?: number; acceleratorVendor?: 'nvidia' | 'ascend' | 'ppu'; onNotice?: (message: string) => void; active?: boolean }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const sessionRef = useRef<string | null>(null)
   const lineRef = useRef('')
@@ -131,7 +131,7 @@ export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor 
 
     const resize = new ResizeObserver(fitAndResize)
     resize.observe(container)
-    const started = api.isDesktop ? api.startTerminal(serverId, terminal.cols, terminal.rows, gpuIndex, acceleratorVendor) : Promise.resolve(null)
+    const started = api.isDesktop ? (startSession ? startSession(terminal.cols, terminal.rows) : api.startTerminal(serverId, terminal.cols, terminal.rows, gpuIndex, acceleratorVendor)) : Promise.resolve(null)
     void started.then((id) => {
       if (disposed) { if (id) void api.closeTerminal(id); return }
       sessionRef.current = id
@@ -157,7 +157,7 @@ export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor 
       if (id) void api.closeTerminal(id)
       terminal.dispose()
     }
-  }, [acceleratorVendor, gpuIndex, onNotice, restart, serverId])
+  }, [acceleratorVendor, gpuIndex, onNotice, restart, serverId, startSession])
 
   useEffect(() => { activateRef.current?.(active) }, [active])
 

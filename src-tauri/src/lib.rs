@@ -1605,6 +1605,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_servers,
             workbench::list_workbench_instances,
+            workbench::workbench_profiles,
+            workbench::start_workbench_terminal,
+            workbench::transfer_workbench_file,
             workbench::collect_workbench_instance,
             save_server,
             list_server_notification_settings,
