@@ -6,8 +6,17 @@ printf '__RACKTOP_UIDMIN__\n'; awk '$1 == "UID_MIN" { print $2; found=1; exit } 
 printf '__RACKTOP_HOST__\n'; hostname
 printf '__RACKTOP_OS__\n'; if [ -r /etc/os-release ]; then . /etc/os-release; printf '%s|%s\n' "${ID:-unknown}" "${PRETTY_NAME:-Linux}"; else printf 'unknown|Linux\n'; fi
 printf '__RACKTOP_CPUMODEL__\n'; awk -F: '/^model name[[:space:]]*:/ {sub(/^[[:space:]]+/, "", $2); print $2; exit}' /proc/cpuinfo
+capture_process_ticks() {
+  awk '{pid=$1; row=$0; sub(/^.*\) /, "", row); n=split(row, f, / +/); if (n >= 20) printf "%s|%s|%.0f\n", pid, f[20], f[12]+f[13]}' /proc/[0-9]*/stat 2>/dev/null || true
+}
 printf '__RACKTOP_CPU1__\n'; head -n 1 /proc/stat
+if [ "${RACKTOP_INCLUDE_PROCESSES:-1}" = 1 ]; then
+  printf '__RACKTOP_PROCTICKS1__\n'; capture_process_ticks
+fi
 sleep 0.25
+if [ "${RACKTOP_INCLUDE_PROCESSES:-1}" = 1 ]; then
+  printf '__RACKTOP_PROCTICKS2__\n'; capture_process_ticks
+fi
 printf '__RACKTOP_CPU2__\n'; head -n 1 /proc/stat
 printf '__RACKTOP_LOAD__\n'; cat /proc/loadavg
 printf '__RACKTOP_MEM__\n'; grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo
@@ -26,6 +35,11 @@ ps -u "$(id -u)" -o pcpu= 2>/dev/null | awk -v n="$(getconf _NPROCESSORS_ONLN 2>
 printf '__RACKTOP_USERMEM__\n'
 ps -u "$(id -u)" -o rss= 2>/dev/null | awk '{s+=$1} END {printf "%.0f\n", s*1024}'
 if [ "${RACKTOP_INCLUDE_PROCESSES:-1}" = 1 ]; then
+  # Full visible process ownership/RSS, independently of the capped detail list.
+  if user_rows="$(ps -eo pid,uid,user:64,rss --no-headers 2>/dev/null)"; then
+    printf '__RACKTOP_USERPROCESSES__\n'
+    printf '%s\n' "$user_rows" | awk '{printf "%s|%s|%s|%s\n", $1, $2, $3, $4}'
+  fi
   printf '__RACKTOP_PS__\n'
   ps -eo user:64=,uid=,pid=,ppid=,pgid=,pcpu=,pmem=,rss=,etime=,args= --sort=-pcpu 2>/dev/null | head -n 128 || true
 fi

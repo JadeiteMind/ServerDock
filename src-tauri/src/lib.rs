@@ -13,6 +13,7 @@ pub mod storage;
 pub mod disk_scan;
 mod terminal;
 mod tray_theme;
+mod user_storage;
 
 #[cfg(target_os = "windows")]
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -955,6 +956,26 @@ fn cancel_project_sync(project_id: String, target_server_id: String) -> Result<(
 }
 
 #[tauri::command]
+async fn discover_user_storage(database: State<'_, Database>, server_id: String, users: Vec<user_storage::StorageUser>, mounts: Vec<String>) -> Result<Vec<user_storage::StorageTarget>, String> {
+    let server = database.get_server(&server_id)?;
+    let password = if server.auth_method == "password" { database.get_password(&server.id, false)? } else { None };
+    user_storage::discover(&server, password.as_deref(), &users, &mounts).await
+}
+
+#[tauri::command]
+fn start_user_storage(database: State<'_, Database>, manager: State<'_, user_storage::UserStorageManager>, server_id: String, targets: Vec<user_storage::StorageTarget>) -> Result<user_storage::StorageScan, String> {
+    let server = database.get_server(&server_id)?;
+    let password = if server.auth_method == "password" { database.get_password(&server.id, false)? } else { None };
+    manager.start(server, password, targets)
+}
+
+#[tauri::command]
+fn get_user_storage(manager: State<'_, user_storage::UserStorageManager>, server_id: String) -> Result<Option<user_storage::StorageScan>, String> { manager.get(&server_id) }
+
+#[tauri::command]
+fn cancel_user_storage(manager: State<'_, user_storage::UserStorageManager>, server_id: String) -> Result<(), String> { manager.cancel(&server_id) }
+
+#[tauri::command]
 fn import_ssh_config(path: Option<String>) -> Result<Vec<ServerDraft>, String> {
     let path = path
         .map(PathBuf::from)
@@ -1418,6 +1439,7 @@ pub fn run() {
             app.manage(database);
             app.manage(TerminalManager::default());
             app.manage(disk_scan::DiskScanManager::default());
+            app.manage(user_storage::UserStorageManager::default());
             app.manage(InteractionLogStore::default());
             #[cfg(target_os = "windows")]
             app.manage(tray_theme::WindowsTrayState::default());
@@ -1563,6 +1585,10 @@ pub fn run() {
             list_project_sync_progress,
             cancel_project_sync,
             import_ssh_config,
+            discover_user_storage,
+            start_user_storage,
+            get_user_storage,
+            cancel_user_storage,
             get_settings,
             save_settings,
             scan_host_key,

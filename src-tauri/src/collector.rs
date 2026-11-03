@@ -1,4 +1,4 @@
-use crate::models::{CpuProcessMetric, DiskMetric, GpuMetric, ManagedRunLaunchResult, ManagedRunRemoteStatus, ProcessMetric, Server, Snapshot, SystemMetric};
+use crate::models::{CpuProcessMetric, DiskMetric, GpuMetric, ManagedRunLaunchResult, ManagedRunRemoteStatus, ProcessMetric, Server, Snapshot, SystemMetric, UserResourceMetric};
 use crate::ssh_keys::expand_identity_path;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::{collections::{HashMap, HashSet}, process::Stdio, time::{SystemTime, UNIX_EPOCH}};
@@ -291,8 +291,46 @@ pub fn parse_snapshot(server_id: &str, output: &str) -> Result<Snapshot, String>
     let processes = parse_gpu_processes(sections.get("GPUPROC"), &gpus, &ps, &pmon, &username);
     let cpu_processes = if sections.contains_key("CPUONLY") { parse_serverdock_processes(&ps, &processes, &username, uid_min) } else { parse_cpu_processes(&ps, &processes, &username, uid_min) };
     let processes_sampled = sections.contains_key("GPUPROC") || (sections.contains_key("CPUONLY") && sections.contains_key("PS"));
+    let user_resources = parse_user_resources(&sections, cpu_delta, uid_min, &username);
+    let user_resources_sampled = sections.contains_key("USERPROCESSES");
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_secs() as i64;
-    Ok(Snapshot { server_id: server_id.into(), hostname, username, os_id: os_id.into(), os_name: os_name.into(), timestamp, status: if sections.contains_key("CPUONLY") || nvidia_smi == "available" { "online".into() } else { "warning".into() }, accelerator_vendor, system, gpus, disks, processes, cpu_processes, processes_sampled, nvidia_smi, nvidia_message })
+    Ok(Snapshot { server_id: server_id.into(), hostname, username, os_id: os_id.into(), os_name: os_name.into(), timestamp, status: if sections.contains_key("CPUONLY") || nvidia_smi == "available" { "online".into() } else { "warning".into() }, accelerator_vendor, system, gpus, disks, processes, cpu_processes, user_resources, user_resources_sampled, processes_sampled, nvidia_smi, nvidia_message })
+}
+
+fn parse_user_resources(sections: &HashMap<String, Vec<String>>, cpu_delta: u64, uid_min: u32, current_user: &str) -> Vec<UserResourceMetric> {
+    fn ticks(lines: Option<&Vec<String>>) -> HashMap<u32, (u64, u64)> {
+        lines.into_iter().flatten().filter_map(|line| {
+            let fields: Vec<_> = line.split('|').collect();
+            if fields.len() != 3 { return None; }
+            Some((fields[0].parse().ok()?, (fields[1].parse().ok()?, fields[2].parse().ok()?)))
+        }).collect()
+    }
+    let before = ticks(sections.get("PROCTICKS1"));
+    let after = ticks(sections.get("PROCTICKS2"));
+    let mut users: HashMap<u32, UserResourceMetric> = HashMap::new();
+    let mut seen = HashSet::new();
+    for line in sections.get("USERPROCESSES").into_iter().flatten() {
+        let f: Vec<_> = line.split('|').collect();
+        if f.len() != 4 || f[2].is_empty() { continue; }
+        let (Ok(pid), Ok(uid), Ok(rss)) = (f[0].parse::<u32>(), f[1].parse::<u32>(), f[3].parse::<u64>()) else { continue; };
+        if !seen.insert(pid) { continue; }
+        let user = users.entry(uid).or_insert_with(|| UserResourceMetric { uid, username: f[2].into(), process_count: 0, cpu_utilization: None, cpu_sampled_process_count: 0, memory_used_bytes: 0, is_system: uid < uid_min && f[2] != current_user });
+        user.process_count += 1;
+        user.memory_used_bytes = user.memory_used_bytes.saturating_add(rss.saturating_mul(1024));
+        if cpu_delta > 0 {
+            if let (Some((start1, ticks1)), Some((start2, ticks2))) = (before.get(&pid), after.get(&pid)) {
+                // PID reuse or unreadable/exited processes must not invent CPU usage.
+                if start1 == start2 && ticks2 >= ticks1 {
+                    *user.cpu_utilization.get_or_insert(0.0) += (*ticks2 - *ticks1) as f64 / cpu_delta as f64 * 100.0;
+                    user.cpu_sampled_process_count += 1;
+                }
+            }
+        }
+    }
+    let mut rows: Vec<_> = users.into_values().collect();
+    for row in &mut rows { row.cpu_utilization = row.cpu_utilization.map(|value| value.clamp(0.0, 100.0)); }
+    rows.sort_by(|a, b| b.cpu_utilization.unwrap_or(-1.0).total_cmp(&a.cpu_utilization.unwrap_or(-1.0)).then_with(|| b.memory_used_bytes.cmp(&a.memory_used_bytes)).then_with(|| a.uid.cmp(&b.uid)));
+    rows
 }
 
 fn parse_disk(line: &str) -> Result<DiskMetric, String> {
@@ -337,7 +375,8 @@ fn is_unified_memory_gpu(name: &str) -> bool {
 fn parse_cpu(line: &str) -> Result<(u64, u64), String> {
     let values: Vec<u64> = line.split_whitespace().skip(1).map(|value| value.parse().unwrap_or(0)).collect();
     if values.len() < 4 { return Err(format!("无效的 /proc/stat 输出：{line}")); }
-    let total = values.iter().sum();
+    // guest/guest_nice are already included in user/nice; do not count twice.
+    let total = values.iter().take(8).sum();
     let idle = values.get(3).copied().unwrap_or(0) + values.get(4).copied().unwrap_or(0);
     Ok((total, idle))
 }
@@ -770,6 +809,28 @@ mod tests {
         for probe in ["nvidia-smi", "npu-smi", "ppu-smi", "mkdir", "touch", "mv ", "rm "] {
             assert!(!REMOTE_SCRIPT.contains(probe), "CPU sampling must not probe accelerators or mutate remote files: {probe}");
         }
+    }
+
+    #[test]
+    fn user_resources_cover_full_processes_and_use_interval_ticks() {
+        assert_eq!(parse_cpu("cpu 10 0 5 100 0 0 0 0 4 0").unwrap(), (115, 100));
+        let mut sections = HashMap::new();
+        // 150 visible processes for one user, beyond both display caps.
+        sections.insert("USERPROCESSES".into(), (1..=150).map(|pid| format!("{pid}|1000|alice|1024")).chain(["200|0|root|2048".into(), "201|1001|bob|4096".into()]).collect());
+        sections.insert("PROCTICKS1".into(), vec!["1|10|100".into(), "2|20|50".into(), "200|30|10".into(), "201|40|10".into()]);
+        sections.insert("PROCTICKS2".into(), vec!["1|10|120".into(), "2|20|55".into(), "200|30|15".into(), "201|99|9999".into()]);
+        let rows = parse_user_resources(&sections, 100, 1000, "alice");
+        let alice = rows.iter().find(|row| row.uid == 1000).unwrap();
+        assert_eq!(alice.process_count, 150);
+        assert_eq!(alice.memory_used_bytes, 150 * 1024 * 1024);
+        assert_eq!(alice.cpu_utilization, Some(25.0));
+        assert_eq!(alice.cpu_sampled_process_count, 2);
+        assert!(!alice.is_system);
+        assert!(rows.iter().find(|row| row.uid == 0).unwrap().is_system);
+        assert_eq!(rows.iter().find(|row| row.uid == 1001).unwrap().cpu_utilization, None); // PID reused
+        let unknown_cpu = parse_user_resources(&sections, 0, 1000, "root");
+        assert!(unknown_cpu.iter().all(|row| row.cpu_utilization.is_none()));
+        assert!(!unknown_cpu.iter().find(|row| row.uid == 0).unwrap().is_system);
     }
 
     #[test]

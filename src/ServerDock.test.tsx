@@ -17,7 +17,7 @@ let container: HTMLDivElement
 let root: ReturnType<typeof createRoot>
 const servers = [{ id: 'a', name: 'compute', host: 'a.local', username: 'user', tags: [], port: 22, samplingIntervalSeconds: 5, historyRetentionDays: 90, remoteHistoryEnabled: false, authMethod: 'sshAgent', status: 'unknown' }, { id: 'b', name: 'archive', host: 'b.local', username: 'user', tags: [], port: 22, samplingIntervalSeconds: 5, historyRetentionDays: 90, remoteHistoryEnabled: false, authMethod: 'sshAgent', status: 'unknown' }] as Server[]
 const project = { id: 'job', name: 'research', sourceServerId: 'a', sourcePath: '/data/research', targets: [{ serverId: 'b', path: '/data/copy' }], status: 'error' } as Project
-const sample = { timestamp: 100, osName: 'Linux', system: { cpuUtilization: 35, cpuModel: 'Xeon', memoryUsedBytes: 16 * 1024 ** 3, memoryTotalBytes: 64 * 1024 ** 3, swapUsedBytes: 0, swapTotalBytes: 0, load1: 1, load5: 2, load15: 3 }, disks: [{ mountPoint: '/data', usedBytes: 10, totalBytes: 100, availableBytes: 90 }], cpuProcesses: [] } as unknown as Snapshot
+const sample = { timestamp: 100, osName: 'Linux', system: { cpuUtilization: 35, cpuModel: 'Xeon', memoryUsedBytes: 16 * 1024 ** 3, memoryTotalBytes: 64 * 1024 ** 3, swapUsedBytes: 0, swapTotalBytes: 0, load1: 1, load5: 2, load15: 3 }, disks: [{ mountPoint: '/data', usedBytes: 10 * 1024 ** 3, totalBytes: 100 * 1024 ** 3, availableBytes: 90 * 1024 ** 3 }], cpuProcesses: [] } as unknown as Snapshot
 const flush = () => act(async () => { for (let i = 0; i < 15; i++) await Promise.resolve() })
 const button = (text: string) => [...container.querySelectorAll('button')].find(button => button.textContent === text)!
 beforeEach(() => {
@@ -30,6 +30,20 @@ beforeEach(() => {
 afterEach(() => { act(() => root.unmount()); container.remove() })
 
 describe('ServerDock CPU workspace', () => {
+  it('shows used and total storage in the fleet and server card', async () => {
+    await act(async () => root.render(<ServerDock />)); await flush()
+    expect(container.querySelector('.sd-capacity')?.textContent).toContain('20.0 GiB / 200.0 GiB')
+    expect(container.querySelector('.sd-card')?.textContent).toContain('10.0 GiB / 100.0 GiB')
+  })
+  it('opens the independently sampled user-resource tab', async () => {
+    vi.mocked(serverdock.collect).mockResolvedValue({ ...sample, userResourcesSampled: true, userResources: [{ uid: 1000, username: 'alice', processCount: 180, cpuUtilization: 22, cpuSampledProcessCount: 175, memoryUsedBytes: 1024 ** 3, isSystem: false }] })
+    await act(async () => root.render(<ServerDock />)); await flush()
+    act(() => button('compute').click()); await flush()
+    act(() => button('用户资源').click()); await flush()
+    expect(container.querySelector('.sd-users')?.textContent).toContain('alice')
+    expect(container.querySelector('.sd-users')?.textContent).toContain('180')
+    expect(container.querySelector('.sd-users')?.textContent).toContain('22.0%')
+  })
   it('imports config aliases in bulk and skips existing connection targets', async () => {
     const fresh = { name: 'cpu-node', host: 'new.local', port: 2222, username: 'alice', authMethod: 'sshConfig', sshAlias: 'cpu-node', identityFile: '~/.ssh/lab_key', proxyJump: 'bastion', tags: [], samplingIntervalSeconds: 2, historyRetentionDays: 90, remoteHistoryEnabled: false } as const
     const draft = { ...fresh, tags: [] }

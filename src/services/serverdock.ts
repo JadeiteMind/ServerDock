@@ -11,7 +11,14 @@ export const serverdock = {
   },
   async collect(id: string, disks: boolean): Promise<Snapshot> {
     const snapshot = await api.collectServer(id, true, disks, true, true)
-    return { ...snapshot, gpus: [], processes: [] }
+    return { ...snapshot, gpus: [], processes: [], ...(!api.isDesktop ? {
+      userResourcesSampled: true,
+      userResources: [
+        { uid: 1000, username: snapshot.username, processCount: 38, cpuUtilization: 8.4, cpuSampledProcessCount: 36, memoryUsedBytes: 12 * 1024 ** 3, isSystem: false },
+        { uid: 1001, username: 'researcher', processCount: 21, cpuUtilization: 4.2, cpuSampledProcessCount: 21, memoryUsedBytes: 8 * 1024 ** 3, isSystem: false },
+        { uid: 0, username: 'root', processCount: 84, cpuUtilization: 1.2, cpuSampledProcessCount: 80, memoryUsedBytes: 2 * 1024 ** 3, isSystem: true },
+      ],
+    } : {}) }
   },
   async transfer(projectId: string, targetServerId: string, mode: TransferMode) {
     if (!api.isDesktop) throw new Error('网页为演示模式，真实文件传输请使用 ServerDock 桌面应用。')

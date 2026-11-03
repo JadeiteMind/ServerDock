@@ -4016,6 +4016,8 @@ mod tests {
             disks: Vec::new(),
             processes: Vec::new(),
             cpu_processes: Vec::new(),
+            user_resources: Vec::new(),
+            user_resources_sampled: false,
             processes_sampled: true,
             nvidia_smi: "available".into(),
             nvidia_message: None,
