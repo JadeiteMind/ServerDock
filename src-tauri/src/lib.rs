@@ -276,6 +276,11 @@ fn save_server_notification_settings(
 }
 
 #[tauri::command]
+fn remove_server_connection(database: State<'_, Database>, server_id: String) -> Result<(), String> {
+    database.delete_server(&server_id)
+}
+
+#[tauri::command]
 async fn delete_server(
     database: State<'_, Database>,
     server_id: String,
@@ -1602,6 +1607,7 @@ pub fn run() {
             list_server_notification_settings,
             save_server_notification_settings,
             delete_server,
+            remove_server_connection,
             retry_remote_cleanups,
             reorder_servers,
             start_terminal,

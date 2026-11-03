@@ -51,6 +51,21 @@ describe('ServerDock CPU workspace', () => {
     await act(async () => root.render(<ServerDock />)); await flush()
     expect(invoke).toHaveBeenLastCalledWith('update_serverdock_tray', { summary: expect.stringContaining('1 / 2 台在线 · 1 台连接失败\n平均 CPU 35.0% · 内存 25.0%') })
   })
+  it('requires confirmation and removes only the selected saved connection', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true)
+    try {
+      vi.mocked(serverdock.servers).mockResolvedValueOnce(servers).mockResolvedValueOnce([servers[1]])
+      await act(async () => root.render(<ServerDock />)); await flush()
+      act(() => button('compute').click())
+      act(() => button('移除服务器').click())
+      expect(invoke).not.toHaveBeenCalledWith('remove_server_connection', expect.anything())
+      await act(async () => button('移除服务器').click()); await flush()
+      expect(invoke).toHaveBeenCalledWith('remove_server_connection', { serverId: 'a' })
+      expect(container.textContent).toContain('已移除“compute”')
+      expect(button('compute')).toBeUndefined()
+      expect(button('archive')).toBeDefined()
+    } finally { confirm.mockRestore() }
+  })
   it('shows used and total storage in the fleet and server card', async () => {
     await act(async () => root.render(<ServerDock />)); await flush()
     expect(container.querySelector('.sd-capacity')?.textContent).toContain('20.0 GiB / 200.0 GiB')
