@@ -20,6 +20,7 @@ export function splitServerTagInput(value: string) {
 }
 
 interface ServerFormProps {
+  cpuOnly?: boolean
   initial?: Partial<ServerDraft>
   defaultRemoteHistoryEnabled?: boolean
   showGuide?: boolean
@@ -28,7 +29,7 @@ interface ServerFormProps {
   onSave: (draft: ServerDraft) => Promise<void>
 }
 
-export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGuide = true, onGuideDismiss, onClose, onSave }: ServerFormProps) {
+export function ServerForm({ initial, cpuOnly = false, defaultRemoteHistoryEnabled = true, showGuide = true, onGuideDismiss, onClose, onSave }: ServerFormProps) {
   const [draft, setDraft] = useState<ServerDraft>({
     id: initial?.id,
     name: initial?.name ?? '',
@@ -187,7 +188,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
       setError('请填写服务器名称后再连接。')
       return
     }
-    if (!initial?.id && draft.authMethod === 'sshAgent' && !sshSetupConfirmed) {
+    if (!cpuOnly && !initial?.id && draft.authMethod === 'sshAgent' && !sshSetupConfirmed) {
       setError('请先复制并执行 SSH 密钥快速配置，完成后再连接。')
       return
     }
@@ -266,7 +267,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
               </div>
               </fieldset>
             {draft.authMethod === 'sshConfig' && (
-              <label>SSH Config 别名<input value={draft.sshAlias ?? ''} onChange={(event) => set('sshAlias', event.target.value)} placeholder="~/.ssh/config 中的 Host，例如 gpu-a" /></label>
+              <label>SSH Config 别名<input value={draft.sshAlias ?? ''} onChange={(event) => set('sshAlias', event.target.value)} placeholder="~/.ssh/config 中的 Host，例如 server-a" /></label>
             )}
             {draft.authMethod === 'privateKey' && (
               <><label>私钥路径<input value={draft.identityFile ?? ''} onChange={(event) => set('identityFile', event.target.value)} placeholder="~/.ssh/id_ed25519" /></label>{setupVerification.phase === 'success' && <p className="key-guide__validation key-guide__validation--success" role="status"><Check size={14} />{setupVerification.message}</p>}</>
@@ -291,7 +292,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
                 <label className="checkbox-card"><input type="checkbox" checked={draft.savePassword ?? true} onChange={(event) => set('savePassword', event.target.checked)} /><span>保存到系统钥匙串</span></label>
               </div>
             )}
-            {draft.authMethod === 'sshAgent' && (
+            {draft.authMethod === 'sshAgent' && !cpuOnly && (
               <details className="key-guide">
                 <summary>
                   <span className="key-guide__summary-icon"><KeyRound size={17} /></span>
@@ -309,14 +310,14 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
             )}
             <div className="form-grid form-grid--2">
               <label>跳板机 ProxyJump<input value={draft.proxyJump ?? ''} onChange={(event) => set('proxyJump', event.target.value)} placeholder="可选" /></label>
-              <label>标签<div className="server-tag-input" onClick={(event) => event.currentTarget.querySelector('input')?.focus()}>{draft.tags.map((tag, index) => <span className="server-tag-input__token" key={`${tag}-${index}`}>{tag}</span>)}<input aria-label="添加服务器标签" value={tagText} onChange={(event) => updateTagText(event.target.value)} onBlur={commitTagText} onKeyDown={(event) => { if ((event.key === 'Backspace' || event.key === 'Delete') && editLastTag()) event.preventDefault() }} placeholder={draft.tags.length === 0 ? 'lab, h100' : ''} /></div></label>
+              <label>标签<div className="server-tag-input" onClick={(event) => event.currentTarget.querySelector('input')?.focus()}>{draft.tags.map((tag, index) => <span className="server-tag-input__token" key={`${tag}-${index}`}>{tag}</span>)}<input aria-label="添加服务器标签" value={tagText} onChange={(event) => updateTagText(event.target.value)} onBlur={commitTagText} onKeyDown={(event) => { if ((event.key === 'Backspace' || event.key === 'Delete') && editLastTag()) event.preventDefault() }} placeholder={draft.tags.length === 0 ? 'lab, cpu' : ''} /></div></label>
             </div>
-            <label className="switch-row remote-history-row"><Database size={18} /><span><strong>服务器远端缓存 30 天</strong><small>固定保留 30 天；RackTop 关闭期间继续采集，重新打开后同步到本机 90 天历史。不保存进程和命令。</small></span><input type="checkbox" checked={draft.remoteHistoryEnabled} onChange={(event) => set('remoteHistoryEnabled', event.target.checked)} /></label>
+            {!cpuOnly && <label className="switch-row remote-history-row"><Database size={18} /><span><strong>服务器远端缓存 30 天</strong><small>固定保留 30 天；RackTop 关闭期间继续采集，重新打开后同步到本机 90 天历史。不保存进程和命令。</small></span><input type="checkbox" checked={draft.remoteHistoryEnabled} onChange={(event) => set('remoteHistoryEnabled', event.target.checked)} /></label>}
             {error && <p className="form-error" role="alert">{error}</p>}
           </div>
           <footer className="sheet__footer">
             <button type="button" className="button button--secondary" onClick={onClose}>取消</button>
-            <button type="submit" className="button button--primary" disabled={saving || (draft.authMethod === 'password' && !passwordAcknowledged) || (!initial?.id && draft.authMethod === 'sshAgent' && !sshSetupConfirmed)}>
+            <button type="submit" className="button button--primary" disabled={saving || (draft.authMethod === 'password' && !passwordAcknowledged) || (!cpuOnly && !initial?.id && draft.authMethod === 'sshAgent' && !sshSetupConfirmed)}>
               <Check size={17} />{saving ? '保存中…' : '保存并连接'}
             </button>
           </footer>

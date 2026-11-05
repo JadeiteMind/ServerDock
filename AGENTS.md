@@ -1,3 +1,18 @@
+# ServerDock fork overrides
+
+This repository is JadeiteMind/ServerDock, a CPU-oriented fork of Tongzh-SEU/RackTop.
+User-approved scope: Linux CPU, memory, storage, SSH terminals, and cross-server transfers.
+Direct transfers are the default; relay is an explicit user choice, never automatic.
+
+- Use the actual local checkout; upstream macOS-only paths below are historical and do not apply on Windows.
+- Push changes only to JadeiteMind/ServerDock. Keep Tongzh-SEU/RackTop as read-only upstream.
+- Preserve GPL-3.0 and upstream attribution. Keep the inherited version until a separately authorized release.
+- Use feature branches and draft PRs to `develop`; create `develop` from this fork's main if missing.
+- No automatic releases, update manifests, or signing-key reuse from upstream.
+- Legacy accelerator models/parsers/tests may remain for compatibility, but must not be exposed by ServerDock's UI or remote collector.
+
+The inherited guidelines below apply where consistent with these overrides and the user's instructions.
+
 ## 目录
 
 - [0 固定工作区与工具路径](#0-固定工作区与工具路径)

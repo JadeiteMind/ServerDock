@@ -124,9 +124,21 @@ export interface Snapshot {
   disks?: DiskMetric[]
   processes: ProcessMetric[]
   cpuProcesses: CpuProcessMetric[]
+  userResources?: UserResourceMetric[]
+  userResourcesSampled?: boolean
   processesSampled: boolean
   nvidiaSmi: 'available' | 'degraded' | 'missing' | 'permissionDenied' | 'failed'
   nvidiaMessage?: string | null
+}
+
+export interface UserResourceMetric {
+  uid: number
+  username: string
+  processCount: number
+  cpuUtilization: number | null
+  cpuSampledProcessCount: number
+  memoryUsedBytes: number
+  isSystem: boolean
 }
 
 export type MountScanStatus = 'pending' | 'scanning' | 'success' | 'timeout' | 'permissionDenied' | 'connectionFailed' | 'unrecognized' | 'duplicate' | 'failed' | 'busy'

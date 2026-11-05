@@ -5,3 +5,9 @@ src-tauri/target/
 output/playwright/
 .DS_Store
 *.log
+
+# Local agent design tools (not application dependencies)
+.agents/
+skills-lock.json
+
+src-tauri/gen/schemas/windows-schema.json

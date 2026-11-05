@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.jadeitemind.serverdock</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <name>ServerDock</name>
+  <summary>CPU, memory, storage and cross-server transfers over SSH</summary>
+  <description><p>ServerDock is a Linux server workspace derived from RackTop, with CPU, memory, storage monitoring, terminals and data transfers.</p></description>
+  <launchable type="desktop-id">ServerDock.desktop</launchable>
+  <provides><binary>racktop</binary></provides>
+  <categories><category>Development</category></categories>
+  <url type="homepage">https://github.com/JadeiteMind/ServerDock</url>
+  <url type="bugtracker">https://github.com/JadeiteMind/ServerDock/issues</url>
+</component>

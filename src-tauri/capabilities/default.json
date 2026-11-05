@@ -1,15 +1,16 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "RackTop desktop capabilities",
+  "description": "ServerDock desktop capabilities",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
     "core:window:allow-toggle-maximize",
+    "core:window:allow-minimize",
+    "core:window:allow-close",
     "notification:default",
     "opener:default",
-    "process:allow-restart",
-    "updater:default"
+    "process:allow-restart"
   ]
 }

@@ -47,6 +47,15 @@ impl TerminalManager {
         gpu_index: Option<u32>,
         accelerator_vendor: &str,
     ) -> Result<String, String> {
+        let mut command = configured_ssh_command(server, password)?;
+        if let Some(index) = gpu_index {
+            let variable = visible_devices_variable(accelerator_vendor);
+            command.arg(format!("export {variable}={index}; exec \"${{SHELL:-/bin/sh}}\" -l"));
+        }
+        self.start_command(app, command, columns, rows)
+    }
+
+    pub(crate) fn start_command(&self, app: AppHandle, command: CommandBuilder, columns: u16, rows: u16) -> Result<String, String> {
         let pty = native_pty_system();
         let pair = pty.openpty(PtySize {
             rows: rows.max(2),
@@ -55,12 +64,7 @@ impl TerminalManager {
             pixel_height: 0,
         }).map_err(|error| format!("无法创建终端 PTY：{error}"))?;
 
-        let mut command = configured_ssh_command(server, password)?;
-        if let Some(index) = gpu_index {
-            let variable = visible_devices_variable(accelerator_vendor);
-            command.arg(format!("export {variable}={index}; exec \"${{SHELL:-/bin/sh}}\" -l"));
-        }
-        let child = pair.slave.spawn_command(command).map_err(|error| format!("无法启动 SSH 终端：{error}"))?;
+        let child = pair.slave.spawn_command(command).map_err(|error| format!("无法启动远程终端：{error}"))?;
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().map_err(|error| format!("无法读取终端输出：{error}"))?;
         let writer = pair.master.take_writer().map_err(|error| format!("无法写入终端：{error}"))?;

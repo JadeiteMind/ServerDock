@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "RackTop",
+  "productName": "ServerDock",
   "version": "1.26.2",
-  "identifier": "com.racktop.desktop",
+  "identifier": "io.github.jadeitemind.serverdock",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,36 +12,29 @@
   "app": {
     "windows": [
       {
-        "title": "RackTop",
+        "title": "ServerDock",
         "width": 1320,
         "height": 820,
         "minWidth": 900,
         "minHeight": 620,
         "resizable": true,
         "fullscreen": false,
-        "titleBarStyle": "Overlay",
-        "hiddenTitle": true,
-        "trafficLightPosition": { "x": 16, "y": 18 }
+        "titleBarStyle": "Visible",
+        "hiddenTitle": false,
+        "trafficLightPosition": {
+          "x": 16,
+          "y": 18
+        }
       }
     ],
     "security": {
       "csp": "default-src 'self'; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost https://api.github.com"
     }
   },
-  "plugins": {
-    "updater": {
-      "endpoints": [
-        "https://raw.githubusercontent.com/Tongzh-SEU/RackTop/updater/latest.json"
-      ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg1NkFGREM4Q0QyN0U2RkYKUldULzVpZk55UDFxaFNWL0VQL1dXNUNtRHJyam5jUDdYSFZJZU5rZnpiMWtEYUpKNGI0YjE4b0IK",
-      "windows": {
-        "installMode": "passive"
-      }
-    }
-  },
+  "plugins": {},
   "bundle": {
     "active": true,
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": false,
     "targets": "all",
     "icon": [
       "icons/32x32.png",
@@ -51,19 +44,23 @@
       "icons/icon.ico"
     ],
     "category": "DeveloperTool",
-    "shortDescription": "Monitor every GPU server from one screen",
-    "longDescription": "RackTop monitors GPU, CPU, memory and processes across Linux servers over SSH.",
+    "shortDescription": "CPU, memory, storage and data transfers across Linux servers",
+    "longDescription": "ServerDock manages Linux servers over SSH, with CPU, memory and storage monitoring and cross-server file transfers. Based on RackTop.",
     "macOS": {
       "minimumSystemVersion": "11.0"
     },
     "windows": {
-      "wix": { "language": "zh-CN" },
+      "wix": {
+        "language": "zh-CN"
+      },
       "nsis": {
         "installerIcon": "icons/icon.ico",
         "uninstallerIcon": "icons/icon.ico",
         "installMode": "currentUser",
-        "languages": ["SimpChinese"],
-        "startMenuFolder": "RackTop"
+        "languages": [
+          "SimpChinese"
+        ],
+        "startMenuFolder": "ServerDock"
       }
     }
   }

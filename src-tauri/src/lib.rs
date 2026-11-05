@@ -1,3 +1,4 @@
+mod workbench;
 mod app_update;
 #[cfg(target_os = "linux")]
 mod linux_app_update;
@@ -13,12 +14,13 @@ pub mod storage;
 pub mod disk_scan;
 mod terminal;
 mod tray_theme;
+mod user_storage;
 
 #[cfg(target_os = "windows")]
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use models::{
     AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation,
-    InteractionLogSummary, InteractionServerSummary, ManagedRunLaunchResult,
+    InteractionLogSummary, InteractionServerSummary,
     ManagedRunRemoteStatus, Project, ProjectDraft, ProjectPathCheck, ProjectSyncProgress,
     ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult,
     Server, ServerDraft, ServerNotificationSettings, Snapshot, UsageDistribution,
@@ -275,6 +277,11 @@ fn save_server_notification_settings(
 }
 
 #[tauri::command]
+fn remove_server_connection(database: State<'_, Database>, server_id: String) -> Result<(), String> {
+    database.delete_server(&server_id)
+}
+
+#[tauri::command]
 async fn delete_server(
     database: State<'_, Database>,
     server_id: String,
@@ -289,7 +296,7 @@ async fn delete_server(
     let managed_public_key = if revoke_ssh_access {
         Some(
             ssh_keys::managed_public_key(&server)?
-                .ok_or("这台服务器未使用 RackTop 专用密钥，无法自动撤销免密登录")?,
+                .ok_or("这台服务器未使用 ServerDock 专用密钥，无法自动撤销免密登录")?,
         )
     } else {
         None
@@ -299,7 +306,7 @@ async fn delete_server(
         Ok(()) => {
             database.delete_server(&server_id)?;
             let suffix = if revoke_ssh_access {
-                "，并已撤销 RackTop 免密登录"
+                "，并已撤销 ServerDock 免密登录"
             } else {
                 ""
             };
@@ -307,7 +314,7 @@ async fn delete_server(
                 remote_cleaned: true,
                 cleanup_pending: false,
                 message: format!(
-                    "已删除“{}”及其本地与远端 RackTop 数据{}",
+                    "已删除“{}”及其本地与远端 ServerDock 数据{}",
                     server.name, suffix
                 ),
             })
@@ -423,7 +430,7 @@ fn open_setup_terminal(script: String) -> Result<(), String> {
 
         let path = shell_quote(script_path.to_string_lossy().as_ref());
         let command = format!(
-            "clear; printf '%s\\n\\n' 'RackTop SSH 密钥快速配置'; cat {path}; printf '%s\\n\\n' '正在执行…'; /bin/sh {path}; status=$?; rm -f {path}; printf '\\n%s\\n' 'RackTop SSH 配置已结束。'; exit $status"
+            "clear; printf '%s\\n\\n' 'ServerDock SSH 密钥快速配置'; cat {path}; printf '%s\\n\\n' '正在执行…'; /bin/sh {path}; status=$?; rm -f {path}; printf '\\n%s\\n' 'ServerDock SSH 配置已结束。'; exit $status"
         );
         let apple_script_command = command.replace('\\', "\\\\").replace('"', "\\\"");
         Command::new("osascript").args(["-e", &format!("tell application \"Terminal\" to activate\ntell application \"Terminal\" to do script \"{apple_script_command}\"")]).spawn().map_err(|error| format!("无法打开 macOS Terminal：{error}"))?;
@@ -502,7 +509,7 @@ async fn verify_ssh_setup(draft: ServerDraft) -> Result<(), String> {
         .stderr(std::process::Stdio::piped());
     let output = tokio::time::timeout(std::time::Duration::from_secs(12), command.output())
         .await
-        .map_err(|_| "等待 RackTop 专用密钥验证超时".to_string())?
+        .map_err(|_| "等待 ServerDock 专用密钥验证超时".to_string())?
         .map_err(|error| format!("无法启动系统 ssh：{error}"))?;
     if !output.status.success() {
         return Err(collector::classify_ssh_error(
@@ -931,6 +938,16 @@ async fn sync_project(
 }
 
 #[tauri::command]
+async fn sync_project_direct(
+    database: State<'_, Database>,
+    project_id: String,
+    target_server_id: String,
+) -> Result<ProjectSyncResult, String> {
+    let project = database.get_project(&project_id)?;
+    project_sync::sync_direct(&database, &project, &target_server_id).await
+}
+
+#[tauri::command]
 fn list_project_sync_progress() -> Vec<ProjectSyncProgress> {
     project_sync::list_progress()
 }
@@ -943,6 +960,26 @@ fn cancel_project_sync(project_id: String, target_server_id: String) -> Result<(
         Err("找不到正在运行的同步任务".into())
     }
 }
+
+#[tauri::command]
+async fn discover_user_storage(database: State<'_, Database>, server_id: String, users: Vec<user_storage::StorageUser>, mounts: Vec<String>) -> Result<Vec<user_storage::StorageTarget>, String> {
+    let server = database.get_server(&server_id)?;
+    let password = if server.auth_method == "password" { database.get_password(&server.id, false)? } else { None };
+    user_storage::discover(&server, password.as_deref(), &users, &mounts).await
+}
+
+#[tauri::command]
+fn start_user_storage(database: State<'_, Database>, manager: State<'_, user_storage::UserStorageManager>, server_id: String, targets: Vec<user_storage::StorageTarget>) -> Result<user_storage::StorageScan, String> {
+    let server = database.get_server(&server_id)?;
+    let password = if server.auth_method == "password" { database.get_password(&server.id, false)? } else { None };
+    manager.start(server, password, targets)
+}
+
+#[tauri::command]
+fn get_user_storage(manager: State<'_, user_storage::UserStorageManager>, server_id: String) -> Result<Option<user_storage::StorageScan>, String> { manager.get(&server_id) }
+
+#[tauri::command]
+fn cancel_user_storage(manager: State<'_, user_storage::UserStorageManager>, server_id: String) -> Result<(), String> { manager.cancel(&server_id) }
 
 #[tauri::command]
 fn import_ssh_config(path: Option<String>) -> Result<Vec<ServerDraft>, String> {
@@ -1000,24 +1037,6 @@ fn trust_host_key(database: State<'_, Database>, info: HostKeyInfo) -> Result<()
 }
 
 #[tauri::command]
-async fn install_nvidia_driver(
-    database: State<'_, Database>,
-    server_id: String,
-    confirmed: bool,
-) -> Result<String, String> {
-    if !confirmed {
-        return Err("必须在界面明确确认后才能安装驱动".into());
-    }
-    let server = database.get_server(&server_id)?;
-    let password = if server.auth_method == "password" {
-        database.get_password(&server_id, true)?
-    } else {
-        None
-    };
-    collector::install_nvidia_driver(&server, password.as_deref()).await
-}
-
-#[tauri::command]
 async fn terminate_process(
     database: State<'_, Database>,
     server_id: String,
@@ -1034,36 +1053,6 @@ async fn terminate_process(
         None
     };
     collector::terminate_process_tree(&server, password.as_deref(), pid).await
-}
-
-#[tauri::command]
-async fn launch_managed_run(
-    database: State<'_, Database>,
-    server_id: String,
-    run_id: String,
-    working_directory: String,
-    command: String,
-    gpu_indices: Vec<u32>,
-    project_log_path: Option<String>,
-    accelerator_vendor: Option<String>,
-) -> Result<ManagedRunLaunchResult, String> {
-    let server = database.get_server(&server_id)?;
-    let password = if server.auth_method == "password" {
-        database.get_password(&server_id, true)?
-    } else {
-        None
-    };
-    collector::launch_managed_run(
-        &server,
-        password.as_deref(),
-        &run_id,
-        &working_directory,
-        &command,
-        &gpu_indices,
-        project_log_path.as_deref(),
-        accelerator_vendor.as_deref().unwrap_or("nvidia"),
-    )
-    .await
 }
 
 #[tauri::command]
@@ -1272,25 +1261,20 @@ mod tray_image_tests {
 
 fn build_tray_menu(
     app: &AppHandle,
-    reservation_pending: usize,
-    process_warnings: usize,
+    _reservation_pending: usize,
+    _process_warnings: usize,
 ) -> Result<Menu<tauri::Wry>, Box<dyn std::error::Error>> {
-    let open = MenuItemBuilder::with_id("open", "打开 RackTop").build(app)?;
-    let reservations = MenuItemBuilder::with_id(
-        "reservations",
-        format!("预约待处理  {}", reservation_pending),
-    )
-    .build(app)?;
-    let processes = MenuItemBuilder::with_id(
-        "mine-processes",
-        format!("我的进程异常  {}", process_warnings),
-    )
-    .build(app)?;
+    let open = MenuItemBuilder::with_id("open", "打开 ServerDock").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
+    let hide = MenuItemBuilder::with_id("hide", "最小化到托盘").build(app)?;
+    let summary = app.state::<ServerDockTrayState>();
     Ok(MenuBuilder::new(app)
         .item(&open)
+        .item(&hide)
         .separator()
-        .items(&[&reservations, &processes])
+        .item(&summary.servers)
+        .item(&summary.resources)
+        .item(&summary.updated)
         .separator()
         .item(&quit)
         .build()?)
@@ -1298,14 +1282,14 @@ fn build_tray_menu(
 
 #[cfg(target_os = "macos")]
 fn build_application_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, Box<dyn std::error::Error>> {
-    let about = MenuItemBuilder::with_id("menu-about", "关于 RackTop").build(app)?;
+    let about = MenuItemBuilder::with_id("menu-about", "关于 ServerDock").build(app)?;
     let settings = MenuItemBuilder::with_id("menu-settings", "设置…")
         .accelerator("CmdOrCtrl+,")
         .build(app)?;
-    let quit = MenuItemBuilder::with_id("menu-quit", "退出 RackTop")
+    let quit = MenuItemBuilder::with_id("menu-quit", "退出 ServerDock")
         .accelerator("CmdOrCtrl+Q")
         .build(app)?;
-    let racktop = SubmenuBuilder::new(app, "RackTop")
+    let racktop = SubmenuBuilder::new(app, "ServerDock")
         .items(&[&about, &settings])
         .separator()
         .item(&quit)
@@ -1335,22 +1319,14 @@ fn build_application_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, Box<dyn s
         .item(&refresh_all)
         .build()?;
 
-    let fleet = MenuItemBuilder::with_id("menu-view-fleet", "算力总览")
+    let fleet = MenuItemBuilder::with_id("menu-view-fleet", "服务器总览")
         .accelerator("CmdOrCtrl+1")
         .build(app)?;
-    let idle = MenuItemBuilder::with_id("menu-view-idle", "空闲算力")
+    let transfers = MenuItemBuilder::with_id("menu-view-transfers", "数据传输")
         .accelerator("CmdOrCtrl+2")
         .build(app)?;
-    let mine = MenuItemBuilder::with_id("menu-view-mine", "我的进程")
-        .accelerator("CmdOrCtrl+3")
-        .build(app)?;
-    let logs = MenuItemBuilder::with_id("menu-view-logs", "日志")
-        .accelerator("CmdOrCtrl+L")
-        .build(app)?;
     let view = SubmenuBuilder::new(app, "查看")
-        .items(&[&fleet, &idle, &mine])
-        .separator()
-        .item(&logs)
+        .items(&[&fleet, &transfers])
         .build()?;
 
     let window = SubmenuBuilder::with_id(app, WINDOW_SUBMENU_ID, "窗口")
@@ -1370,6 +1346,31 @@ fn build_application_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, Box<dyn s
     Ok(MenuBuilder::new(app)
         .items(&[&racktop, &edit, &servers, &view, &window, &help])
         .build()?)
+}
+
+struct ServerDockTrayState {
+    servers: tauri::menu::MenuItem<tauri::Wry>,
+    resources: tauri::menu::MenuItem<tauri::Wry>,
+    updated: tauri::menu::MenuItem<tauri::Wry>,
+    previous: Mutex<String>,
+}
+
+#[tauri::command]
+fn update_serverdock_tray(app: AppHandle, summary: String) -> Result<(), String> {
+    if summary.len() > 1024 || summary.contains('\0') || summary.lines().count() != 3 {
+        return Err("托盘摘要格式无效".into());
+    }
+    let state = app.state::<ServerDockTrayState>();
+    let mut previous = state.previous.lock().map_err(|e| e.to_string())?;
+    if *previous == summary { return Ok(()); }
+    let lines: Vec<_> = summary.lines().collect();
+    state.servers.set_text(lines[0]).map_err(|e| e.to_string())?;
+    state.resources.set_text(lines[1]).map_err(|e| e.to_string())?;
+    state.updated.set_text(lines[2]).map_err(|e| e.to_string())?;
+    app.tray_by_id("racktop-tray").ok_or("找不到托盘图标")?
+        .set_tooltip(Some(format!("ServerDock\n{summary}"))).map_err(|e| e.to_string())?;
+    *previous = summary;
+    Ok(())
 }
 
 #[derive(Default)]
@@ -1398,7 +1399,7 @@ fn update_tray_summary(
     });
     let tray = app
         .tray_by_id("racktop-tray")
-        .ok_or("找不到 RackTop 菜单栏图标")?;
+        .ok_or("找不到 ServerDock 菜单栏图标")?;
     // Replacing an unchanged native menu dismisses it while the user is reading it.
     if counts_changed {
         let menu = build_tray_menu(&app, reservation_pending, process_warnings)
@@ -1418,7 +1419,7 @@ fn update_tray_summary(
     )
     .map_err(|error| error.to_string())?;
     tray.set_tooltip(Some(&format!(
-        "RackTop · 预约待处理 {} · 我的进程异常 {}",
+        "ServerDock · 预约待处理 {} · 我的进程异常 {}",
         reservation_pending, process_warnings
     )))
     .map_err(|error| error.to_string())?;
@@ -1461,7 +1462,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
+
         .setup(|app| {
             if let Err(error) = process_lifetime::install() {
                 eprintln!("Windows 子进程生命周期隔离未启用：{error}");
@@ -1470,12 +1471,13 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .map_err(|error| Box::<dyn std::error::Error>::from(error))?;
-            let database = Database::open(&app_data.join("racktop.sqlite")).map_err(|error| {
+            let database = Database::open(&app_data.join("serverdock.sqlite")).map_err(|error| {
                 Box::<dyn std::error::Error>::from(std::io::Error::other(error))
             })?;
             app.manage(database);
             app.manage(TerminalManager::default());
             app.manage(disk_scan::DiskScanManager::default());
+            app.manage(user_storage::UserStorageManager::default());
             app.manage(InteractionLogStore::default());
             #[cfg(target_os = "windows")]
             app.manage(tray_theme::WindowsTrayState::default());
@@ -1506,7 +1508,7 @@ pub fn run() {
             // Run best-effort cleanup after the window is visible; a locked
             // database is harmless and will be retried on the next launch.
             let maintenance_handle = app.handle().clone();
-            let maintenance_path = app_data.join("racktop.sqlite");
+            let maintenance_path = app_data.join("serverdock.sqlite");
             std::thread::spawn(move || {
                 if let Err(error) = Database::migrate_usage_in_background(&maintenance_path) {
                     eprintln!("Deferred usage migration skipped: {error}");
@@ -1522,6 +1524,12 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_menu(build_application_menu(&app.handle())?)?;
 
+            app.manage(ServerDockTrayState {
+                servers: MenuItemBuilder::with_id("summary-servers", "服务器：等待采样").enabled(false).build(app)?,
+                resources: MenuItemBuilder::with_id("summary-resources", "CPU / 内存：等待采样").enabled(false).build(app)?,
+                updated: MenuItemBuilder::with_id("summary-updated", "关闭窗口后仍在后台监控").enabled(false).build(app)?,
+                previous: Mutex::new(String::new()),
+            });
             app.manage(TraySummaryState(Mutex::new(Some(("compact".into(), 0, 0)))));
             let menu = build_tray_menu(&app.handle(), 0, 0)?;
             TrayIconBuilder::with_id("racktop-tray")
@@ -1547,15 +1555,19 @@ pub fn run() {
                     #[cfg(not(target_os = "windows"))]
                     let _ = (tray, event);
                 })
-                .tooltip("RackTop · GPU 与 CPU 监控")
+                .tooltip("ServerDock · CPU、内存与存储监控")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "open" | "reservations" | "mine-processes" => {
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.show();
+                            let _ = window.unminimize();
                             let _ = window.set_focus();
                         }
                         let _ = app.emit("tray-action", event.id().as_ref());
+                    }
+                    "hide" => {
+                        if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
                     }
                     "quit" => {
                         app.state::<TerminalManager>().close_all();
@@ -1583,19 +1595,25 @@ pub fn run() {
             _ => {}
         })
         .on_window_event(|window, event| {
-            if matches!(event, WindowEvent::CloseRequested { .. }) {
-                window.app_handle().state::<TerminalManager>().close_all();
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
-            #[cfg(target_os = "linux")]
-            linux_app_update::check_linux_app_update,
-            app_update::install_windows_update,
             list_servers,
+            workbench::list_workbench_instances,
+            workbench::workbench_profiles,
+            workbench::start_workbench_terminal,
+            workbench::transfer_workbench_file,
+            workbench::collect_workbench_instance,
             save_server,
             list_server_notification_settings,
             save_server_notification_settings,
             delete_server,
+            remove_server_connection,
             retry_remote_cleanups,
             reorder_servers,
             start_terminal,
@@ -1612,12 +1630,6 @@ pub fn run() {
             get_history,
             storage_maintenance_active,
             get_history_heatmap,
-            get_usage_distribution,
-            configure_remote_history,
-            sync_remote_history,
-            list_idle_reservations,
-            save_idle_reservation,
-            delete_idle_reservation,
             list_projects,
             save_project,
             delete_project,
@@ -1626,25 +1638,27 @@ pub fn run() {
             inspect_project,
             inspect_project_source,
             sync_project,
+            sync_project_direct,
             list_project_sync_progress,
             cancel_project_sync,
             import_ssh_config,
+            discover_user_storage,
+            start_user_storage,
+            get_user_storage,
+            cancel_user_storage,
             get_settings,
             save_settings,
             scan_host_key,
             trust_host_key,
-            install_nvidia_driver,
             terminate_process,
-            launch_managed_run,
-            read_managed_run_log,
-            get_managed_run_status,
             update_tray_summary,
+            update_serverdock_tray,
             window_minimize,
             window_toggle_maximize,
             window_close
         ])
         .run(tauri::generate_context!())
-        .expect("RackTop 启动失败");
+        .expect("ServerDock 启动失败");
 }
 
 #[cfg(test)]

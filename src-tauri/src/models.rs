@@ -348,9 +348,25 @@ pub struct Snapshot {
     #[serde(default)]
     pub cpu_processes: Vec<CpuProcessMetric>,
     #[serde(default)]
+    pub user_resources: Vec<UserResourceMetric>,
+    #[serde(default)]
+    pub user_resources_sampled: bool,
+    #[serde(default)]
     pub processes_sampled: bool,
     pub nvidia_smi: String,
     pub nvidia_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserResourceMetric {
+    pub uid: u32,
+    pub username: String,
+    pub process_count: u64,
+    pub cpu_utilization: Option<f64>,
+    pub cpu_sampled_process_count: u64,
+    pub memory_used_bytes: u64,
+    pub is_system: bool,
 }
 
 fn default_accelerator_vendor() -> String {
